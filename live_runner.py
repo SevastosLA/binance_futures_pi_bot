@@ -2,17 +2,21 @@
 """
 Orquestador Principal del Bot de Trading para Raspberry Pi (24/7 Live Runner).
 Maneja el bucle de eventos asíncrono, sincronización horaria, monitoreo de precios,
-recolección de telemetría de hardware, auto-recuperación ante fallos y apagado limpio.
+recolección de telemetría de hardware, auto-recuperación ante fallos y envío de gráficos.
 """
 
 import os
 import sys
+
+# Asegurar que el directorio del bot esté en sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import time
 import signal
 import psutil
 import logging
 import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from config import (
     SYMBOLS, POLLING_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_HOURS,
@@ -60,7 +64,6 @@ class BotRunner:
 
     def _get_system_telemetry(self) -> Dict[str, str]:
         """Obtiene métricas de hardware de la Raspberry Pi / Linux."""
-        # 1. Temperatura CPU (Raspberry Pi / Linux)
         cpu_temp = "N/A"
         try:
             if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
@@ -75,11 +78,9 @@ class BotRunner:
         except Exception:
             pass
 
-        # 2. Uso de Memoria RAM
         mem = psutil.virtual_memory()
         ram_str = f"{mem.used / (1024**2):.0f}MB / {mem.total / (1024**2):.0f}MB ({mem.percent}%)"
 
-        # 3. Uptime del Bot
         delta = datetime.datetime.utcnow() - self.start_time
         days = delta.days
         hours, rem = divmod(delta.seconds, 3600)
@@ -97,18 +98,17 @@ class BotRunner:
         logger.info("=" * 70)
         logger.info(" 🤖 INICIANDO ANTIGRAVITY BINANCE FUTURES BOT (RASPBERRY PI)")
         logger.info(f" Modo: {TRADING_MODE} | Activos: {', '.join(SYMBOLS)}")
-        logger.info(f" Intervalo de Polling: {POLLING_INTERVAL_SECONDS}s | Heartbeat: cada {HEARTBEAT_INTERVAL_HOURS}h")
+        logger.info(f" Gráficos en Alertas: ACTIVADOS 📊 (Matplotlib Headless)")
         logger.info("=" * 70)
 
-        # Enviar alerta de inicio por Telegram
         startup_msg = (
             f"🚀 <b>BOT INICIADO / REANUDADO CON ÉXITO</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 <b>Modo:</b> {TRADING_MODE} (Binance Futures)\n"
             f"🪙 <b>Activos Vigilados:</b> <code>{', '.join(SYMBOLS)}</code>\n"
+            f"📊 <b>Gráficos en Alertas:</b> Activados (Visual Chart Suite)\n"
             f"🛡️ <b>Gestión:</b> 2% High-Water Mark + DCA Semanal\n"
-            f"⏱️ <b>Hora Arranque:</b> {self.start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-            f"💾 <i>Estado de base de datos SQLite sincronizado.</i>"
+            f"⏱️ <b>Hora Arranque:</b> {self.start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC"
         )
         self.notifier.send_message(startup_msg)
 
@@ -119,14 +119,10 @@ class BotRunner:
             try:
                 now = datetime.datetime.utcnow()
 
-                # ---------------------------------------------------------
-                # 1. PROCESAR COLA OFFLINE DE TELEGRAM (Drenaje)
-                # ---------------------------------------------------------
+                # 1. Drenar cola offline de Telegram
                 self.notifier.process_outbox_queue()
 
-                # ---------------------------------------------------------
-                # 2. VERIFICAR APORTE SEMANAL DCA
-                # ---------------------------------------------------------
+                # 2. Verificar Aporte Semanal DCA
                 if self.db.process_weekly_dca():
                     total_wallets = self.db.get_all_subwallets()
                     tot_cap = sum(w["capital"] for w in total_wallets.values())
@@ -139,9 +135,7 @@ class BotRunner:
                         f"👑 <i>High-Water Mark incrementado equitativamente.</i>"
                     )
 
-                # ---------------------------------------------------------
-                # 3. VERIFICAR SEÑALES HORARIAS (Velas 1h)
-                # ---------------------------------------------------------
+                # 3. Sincronizar y Evaluar Velas Horarias (1h)
                 for sym in SYMBOLS:
                     try:
                         df_1h = self.feed.fetch_klines(sym, interval="1h", limit=250)
@@ -153,15 +147,12 @@ class BotRunner:
                     except Exception as e:
                         logger.error(f"Error procesando vela 1h para {sym}: {e}")
 
-                # ---------------------------------------------------------
-                # 4. VERIFICAR EJECUCIÓN INTRABARRA / PRECIOS EN TIEMPO REAL
-                # ---------------------------------------------------------
+                # 4. Evaluar Ejecución Intrabarra / Precios en Tiempo Real
                 try:
                     current_prices = self.feed.fetch_all_latest_prices(SYMBOLS)
                     for sym in SYMBOLS:
                         price = current_prices.get(sym)
                         if price:
-                            # Consultar además la vela 15m actual para evaluar High y Low recientes
                             df_15m = self.feed.fetch_klines(sym, interval="15m", limit=3)
                             h_15m = float(df_15m.iloc[-1]["High"]) if df_15m is not None else price
                             l_15m = float(df_15m.iloc[-1]["Low"]) if df_15m is not None else price
@@ -169,9 +160,7 @@ class BotRunner:
                 except Exception as e:
                     logger.error(f"Error en evaluación intrabarra en tiempo real: {e}")
 
-                # ---------------------------------------------------------
-                # 5. EMISIÓN DE HEARTBEAT DIARIO
-                # ---------------------------------------------------------
+                # 5. Emisión de Heartbeat
                 if (now - self.last_heartbeat).total_seconds() >= HEARTBEAT_INTERVAL_HOURS * 3600:
                     telemetry = self._get_system_telemetry()
                     wallets = self.db.get_all_subwallets()
@@ -196,12 +185,8 @@ class BotRunner:
                 logger.critical(f"Error inesperado en el loop principal: {e}", exc_info=True)
                 self.notifier.notify_error(context="Loop Principal 24/7", error_msg=str(e))
 
-            # Esperar antes del siguiente ciclo de polling
             time.sleep(POLLING_INTERVAL_SECONDS)
 
-        # ---------------------------------------------------------
-        # APAGADO SEGURO
-        # ---------------------------------------------------------
         logger.info("Bot detenido de forma segura.")
         self.notifier.send_message(
             f"🛑 <b>BOT DETENIDO MANUALMENTE</b>\n"

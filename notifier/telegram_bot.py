@@ -1,14 +1,19 @@
 """
-Módulo de Notificaciones de Telegram con Cola de Mensajes Offline y Formato Enriquecido.
-Permite operar de forma desatendida y recibir el ciclo de vida completo de cada operación.
+Módulo de Notificaciones de Telegram con Gráficos de Velas y Cola Offline.
+Envía fotos con texto enriquecido al colocar orden límite, llenarse la posición,
+tocar TP/SL o cancelar la orden.
 """
 
+import io
 import logging
 import requests
 import datetime
+import pandas as pd
 from typing import Optional, Dict, Any
+
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from storage.database import DatabaseManager
+from notifier.chart_generator import generate_trade_chart
 
 logger = logging.getLogger("TelegramNotifier")
 
@@ -17,12 +22,13 @@ class TelegramNotifier:
         self.db = db
         self.bot_token = bot_token
         self.chat_id = chat_id
-        self.base_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage" if self.bot_token else None
+        self.base_msg_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage" if self.bot_token else None
+        self.base_photo_url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto" if self.bot_token else None
 
     def _send_raw_http(self, text: str) -> bool:
-        """Envía directamente un mensaje a Telegram con timeout corto."""
+        """Envía un mensaje de texto a Telegram."""
         if not self.bot_token or not self.chat_id:
-            logger.debug("Telegram credentials not configured. Message stored in log only.")
+            logger.debug("Telegram credentials not configured. Message stored in log.")
             return False
 
         payload = {
@@ -32,25 +38,55 @@ class TelegramNotifier:
             "disable_web_page_preview": True
         }
         try:
-            resp = requests.post(self.base_url, json=payload, timeout=8.0)
+            resp = requests.post(self.base_msg_url, json=payload, timeout=10.0)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.warning(f"Error conectando a Telegram (Texto): {e}")
+            return False
+
+    def _send_photo_http(self, photo_buf: io.BytesIO, caption: str) -> bool:
+        """Envía una imagen (gráfico) con caption enriquecido a Telegram."""
+        if not self.bot_token or not self.chat_id:
+            return False
+
+        data = {
+            "chat_id": self.chat_id,
+            "caption": caption,
+            "parse_mode": "HTML"
+        }
+        files = {
+            "photo": ("chart.png", photo_buf.getvalue(), "image/png")
+        }
+        try:
+            resp = requests.post(self.base_photo_url, data=data, files=files, timeout=15.0)
             if resp.status_code == 200:
                 return True
             else:
-                logger.warning(f"Telegram API responded with status {resp.status_code}: {resp.text}")
-                return False
+                logger.warning(f"Telegram API sendPhoto falló (Status {resp.status_code}): {resp.text}")
+                # Fallback a texto si la foto falla
+                return self._send_raw_http(caption)
         except Exception as e:
-            logger.warning(f"Error connecting to Telegram API: {e}")
-            return False
+            logger.warning(f"Error enviando foto a Telegram: {e}")
+            return self._send_raw_http(caption)
 
     def send_message(self, text: str):
-        """Intenta enviar el mensaje inmediatamente; si falla la red, lo encola en SQLite."""
+        """Envía mensaje de texto; encola en SQLite si la red está caída."""
         success = self._send_raw_http(text)
         if not success:
             logger.info("Encolando mensaje en SQLite outbox para reintento posterior.")
             self.db.enqueue_telegram_message(text)
 
+    def send_photo_or_text(self, photo_buf: Optional[io.BytesIO], text: str):
+        """Envía imagen con texto o hace fallback a texto encolado."""
+        if photo_buf is not None:
+            success = self._send_photo_http(photo_buf, text)
+            if not success:
+                self.db.enqueue_telegram_message(text)
+        else:
+            self.send_message(text)
+
     def process_outbox_queue(self):
-        """Procesa y vacía la cola de mensajes pendientes cuando se restablece la conexión."""
+        """Drena la cola de mensajes pendientes tras recuperar la conexión."""
         pending_messages = self.db.get_pending_telegram_messages(limit=5)
         for msg in pending_messages:
             success = self._send_raw_http(msg["message"])
@@ -59,13 +95,17 @@ class TelegramNotifier:
                 logger.info(f"Mensaje encolado #{msg['id']} entregado exitosamente a Telegram.")
             else:
                 self.db.increment_telegram_retry(msg["id"])
-                break  # Si aún no hay conexión, detener el drenaje para este ciclo
+                break
 
     # -------------------------------------------------------------
-    # FORMATOS DE MENSAJES DE TRADING
+    # EVENTOS CON GRÁFICO INCORPORADO
     # -------------------------------------------------------------
-    def notify_limit_placed(self, symbol: str, side: str, trigger_time: str, signal_close: float, signal_ema: float, limit_price: float, risk_usd: float, capital: float, hwm: float):
-        side_icon = "🟢 LONG (Compra con Descuento)" if side == "LONG" else "🔴 SHORT (Venta con Descuento)"
+    def notify_limit_placed(
+        self, symbol: str, side: str, trigger_time: str, signal_close: float,
+        signal_ema: float, limit_price: float, risk_usd: float, capital: float,
+        hwm: float, df_1h: Optional[pd.DataFrame] = None
+    ):
+        side_icon = "🟢 LONG (Compra Límite)" if side == "LONG" else "🔴 SHORT (Venta Límite)"
         text = (
             f"🔔 <b>NUEVA ORDEN LÍMITE COLOCADA</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -75,23 +115,27 @@ class TelegramNotifier:
             f"🎯 <b>Precio Límite (-1.0%):</b> ${limit_price:,.2f}\n"
             f"💰 <b>Riesgo Asignado:</b> ${risk_usd:,.2f} USD (2% HWM)\n"
             f"💼 <b>Capital Subcartera:</b> ${capital:,.2f} USD (HWM: ${hwm:,.2f})\n"
-            f"⏳ <i>Esperando retroceso para ejecución en 15m...</i>"
+            f"⏳ <i>Esperando retroceso en 15m para ejecución...</i>"
         )
-        self.send_message(text)
+        
+        photo_buf = None
+        if df_1h is not None and not df_1h.empty:
+            try:
+                photo_buf = generate_trade_chart(
+                    symbol=symbol, df_1h=df_1h,
+                    title=f"Nueva Señal {side} — Orden Límite Colocada",
+                    limit_price=limit_price
+                )
+            except Exception as e:
+                logger.error(f"Error generando gráfico de orden límite: {e}")
+                
+        self.send_photo_or_text(photo_buf, text)
 
-    def notify_order_cancelled(self, symbol: str, side: str, reason: str, limit_price: float, cancel_time: str):
-        text = (
-            f"❌ <b>ORDEN LÍMITE CANCELADA</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 <b>Activo:</b> <code>{symbol}</code> ({side})\n"
-            f"⏱️ <b>Hora Cancelación:</b> {cancel_time} UTC\n"
-            f"🎯 <b>Precio que esperaba:</b> ${limit_price:,.2f}\n"
-            f"⚠️ <b>Motivo:</b> {reason}\n"
-            f"🔄 <i>Estado restablecido a búsqueda de oportunidades (IDLE).</i>"
-        )
-        self.send_message(text)
-
-    def notify_position_filled(self, symbol: str, side: str, entry_time: str, fill_price: float, tp_price: float, sl_price: float, risk_usd: float):
+    def notify_position_filled(
+        self, symbol: str, side: str, entry_time: str, fill_price: float,
+        tp_price: float, sl_price: float, risk_usd: float,
+        df_1h: Optional[pd.DataFrame] = None
+    ):
         side_icon = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
         text = (
             f"🎯 <b>ORDEN LLENADA — POSICIÓN ACTIVA</b>\n"
@@ -104,10 +148,27 @@ class TelegramNotifier:
             f"💰 <b>Riesgo en Juego:</b> ${risk_usd:,.2f} USD\n"
             f"🛡️ <i>Vigilando resolución TP / SL o salida en 4ª vela...</i>"
         )
-        self.send_message(text)
+        
+        photo_buf = None
+        if df_1h is not None and not df_1h.empty:
+            try:
+                photo_buf = generate_trade_chart(
+                    symbol=symbol, df_1h=df_1h,
+                    title=f"Posición Activa {side} — Entrada en ${fill_price:,.2f}",
+                    limit_price=fill_price, tp_price=tp_price, sl_price=sl_price
+                )
+            except Exception as e:
+                logger.error(f"Error generando gráfico de posición llenada: {e}")
+                
+        self.send_photo_or_text(photo_buf, text)
 
-    def notify_position_closed(self, symbol: str, side: str, exit_time: str, exit_price: float, exit_reason: str, dollar_pnl: float, net_return_pct: float, win: bool, new_capital: float, new_hwm: float):
-        icon = "🏆 <b>TAKE PROFIT ALCANZADO</b>" if win else "🛑 <b>CIERRE DE POSICIÓN</b>"
+    def notify_position_closed(
+        self, symbol: str, side: str, exit_time: str, exit_price: float,
+        exit_reason: str, dollar_pnl: float, net_return_pct: float,
+        win: bool, new_capital: float, new_hwm: float,
+        df_1h: Optional[pd.DataFrame] = None, entry_price: Optional[float] = None
+    ):
+        icon = "🏆 <b>TAKE PROFIT ALCANZADO (+1.0%)</b>" if win else "🛑 <b>CIERRE DE POSICIÓN</b>"
         pnl_sign = "+" if dollar_pnl >= 0 else ""
         pnl_color = "🟢" if win else "🔴"
 
@@ -122,7 +183,46 @@ class TelegramNotifier:
             f"💼 <b>Nuevo Capital Subcartera:</b> ${new_capital:,.2f} USD\n"
             f"👑 <b>High-Water Mark (HWM):</b> ${new_hwm:,.2f} USD"
         )
-        self.send_message(text)
+        
+        photo_buf = None
+        if df_1h is not None and not df_1h.empty:
+            try:
+                photo_buf = generate_trade_chart(
+                    symbol=symbol, df_1h=df_1h,
+                    title=f"Posición Cerrada ({exit_reason}) — PnL: {pnl_sign}${dollar_pnl:.2f}",
+                    limit_price=entry_price, exit_price=exit_price
+                )
+            except Exception as e:
+                logger.error(f"Error generando gráfico de posición cerrada: {e}")
+                
+        self.send_photo_or_text(photo_buf, text)
+
+    def notify_order_cancelled(
+        self, symbol: str, side: str, reason: str, limit_price: float,
+        cancel_time: str, df_1h: Optional[pd.DataFrame] = None
+    ):
+        text = (
+            f"❌ <b>ORDEN LÍMITE CANCELADA</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 <b>Activo:</b> <code>{symbol}</code> ({side})\n"
+            f"⏱️ <b>Hora Cancelación:</b> {cancel_time} UTC\n"
+            f"🎯 <b>Precio que esperaba:</b> ${limit_price:,.2f}\n"
+            f"⚠️ <b>Motivo:</b> {reason}\n"
+            f"🔄 <i>Estado restablecido a búsqueda de oportunidades (IDLE).</i>"
+        )
+        
+        photo_buf = None
+        if df_1h is not None and not df_1h.empty:
+            try:
+                photo_buf = generate_trade_chart(
+                    symbol=symbol, df_1h=df_1h,
+                    title=f"Orden Límite Cancelada — {symbol}",
+                    limit_price=limit_price
+                )
+            except Exception as e:
+                logger.error(f"Error generando gráfico de cancelación: {e}")
+                
+        self.send_photo_or_text(photo_buf, text)
 
     def notify_heartbeat(self, uptime_str: str, cpu_temp: str, ram_usage: str, total_equity: float, cum_deposited: float, active_pos_count: int, pending_orders_count: int):
         roi_pct = ((total_equity - cum_deposited) / cum_deposited) * 100 if cum_deposited > 0 else 0.0

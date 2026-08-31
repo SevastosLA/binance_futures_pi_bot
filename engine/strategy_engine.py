@@ -1,6 +1,7 @@
 """
 Motor de Estrategia Cuantitativa de Reversión en Pullback con Entrada Límite y HWM.
-Maneja la lógica de señales en 1h, ejecución límite en 15m/tiempo real, TP, SL y gestión monetaria.
+Maneja la lógica de señales en 1h, ejecución límite en 15m/tiempo real, TP, SL,
+gestión monetaria y renderizado de gráficos de velas en alertas.
 """
 
 import logging
@@ -25,6 +26,7 @@ class StrategyEngine:
     def __init__(self, db: DatabaseManager, notifier: TelegramNotifier):
         self.db = db
         self.notifier = notifier
+        self.latest_dfs_1h: Dict[str, pd.DataFrame] = {}
 
     def evaluate_hourly_close(self, symbol: str, df_1h: pd.DataFrame):
         """
@@ -38,6 +40,7 @@ class StrategyEngine:
         # Calcular EMA 200
         df_1h = df_1h.copy()
         df_1h["EMA_200"] = calc_ema(df_1h["Close"], EMA_PERIOD)
+        self.latest_dfs_1h[symbol] = df_1h
         
         # Última vela cerrada (índice -2 si la última fila -1 es la vela actualmente abierta)
         closed_candle = df_1h.iloc[-2]
@@ -85,11 +88,11 @@ class StrategyEngine:
 
             if side == "LONG" and red_streak >= MAX_STREAK_EXIT:
                 should_exit = True
-                exit_reason = f"Salida por Tiempo ({MAX_STREAK_EXIT}ª Vela Roja Consecutiva)"
+                exit_reason = f"Salida por Tiempo ({MAX_STREAK_EXIT}ª Vela Roja)"
                 raw_move = ((c_1h - entry_p) / entry_p) - 2 * FEE_RATE
             elif side == "SHORT" and green_streak >= MAX_STREAK_EXIT:
                 should_exit = True
-                exit_reason = f"Salida por Tiempo ({MAX_STREAK_EXIT}ª Vela Verde Consecutiva)"
+                exit_reason = f"Salida por Tiempo ({MAX_STREAK_EXIT}ª Vela Verde)"
                 raw_move = ((entry_p - c_1h) / entry_p) - 2 * FEE_RATE
 
             if should_exit:
@@ -116,7 +119,8 @@ class StrategyEngine:
                 self.notifier.notify_position_closed(
                     symbol=symbol, side=side, exit_time=candle_time_str, exit_price=c_1h,
                     exit_reason=exit_reason, dollar_pnl=dpnl, net_return_pct=raw_move*100,
-                    win=dpnl > 0, new_capital=new_cap, new_hwm=new_hwm
+                    win=dpnl > 0, new_capital=new_cap, new_hwm=new_hwm,
+                    df_1h=df_1h, entry_price=entry_p
                 )
                 logger.info(f"🏁 {symbol} Posición cerrada por 4ª vela. PnL: ${dpnl:+.4f} USD.")
             return
@@ -149,7 +153,7 @@ class StrategyEngine:
                 self.db.reset_order_state(symbol)
                 self.notifier.notify_order_cancelled(
                     symbol=symbol, side=side, reason=cancel_reason,
-                    limit_price=limit_p, cancel_time=candle_time_str
+                    limit_price=limit_p, cancel_time=candle_time_str, df_1h=df_1h
                 )
                 logger.info(f"❌ {symbol} Orden límite cancelada: {cancel_reason}")
             return
@@ -171,7 +175,8 @@ class StrategyEngine:
                 self.notifier.notify_limit_placed(
                     symbol=symbol, side="LONG", trigger_time=candle_time_str,
                     signal_close=c_1h, signal_ema=ema_val, limit_price=limit_p,
-                    risk_usd=trade_risk, capital=wallet["capital"], hwm=wallet["hwm"]
+                    risk_usd=trade_risk, capital=wallet["capital"], hwm=wallet["hwm"],
+                    df_1h=df_1h
                 )
                 logger.info(f"🔔 {symbol} Señal LONG detectada. Orden límite colocada en ${limit_p:,.2f}")
 
@@ -186,7 +191,8 @@ class StrategyEngine:
                 self.notifier.notify_limit_placed(
                     symbol=symbol, side="SHORT", trigger_time=candle_time_str,
                     signal_close=c_1h, signal_ema=ema_val, limit_price=limit_p,
-                    risk_usd=trade_risk, capital=wallet["capital"], hwm=wallet["hwm"]
+                    risk_usd=trade_risk, capital=wallet["capital"], hwm=wallet["hwm"],
+                    df_1h=df_1h
                 )
                 logger.info(f"🔔 {symbol} Señal SHORT detectada. Orden límite colocada en ${limit_p:,.2f}")
 
@@ -198,12 +204,13 @@ class StrategyEngine:
         order_state = self.db.get_order_state(symbol)
         state = order_state.get("state", 0)
         if state == 0:
-            return  # Nada que evaluar si está en búsqueda de señales
+            return
 
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         h_price = candle_15m_high if candle_15m_high is not None else current_price
         l_price = candle_15m_low if candle_15m_low is not None else current_price
         wallet = self.db.get_subwallet(symbol)
+        df_1h = self.latest_dfs_1h.get(symbol)
 
         # -------------------------------------------------------------
         # EVALUAR LLENADO DE ORDEN LÍMITE PENDIENTE (State 1 -> 2)
@@ -227,7 +234,8 @@ class StrategyEngine:
                 self.db.set_position_filled(symbol, entry_time=now_str, fill_price=limit_p, tp_price=tp_p, sl_price=sl_p)
                 self.notifier.notify_position_filled(
                     symbol=symbol, side=side, entry_time=now_str,
-                    fill_price=limit_p, tp_price=tp_p, sl_price=sl_p, risk_usd=risk_usd
+                    fill_price=limit_p, tp_price=tp_p, sl_price=sl_p, risk_usd=risk_usd,
+                    df_1h=df_1h
                 )
                 logger.info(f"🎯 {symbol} Orden {side} llenada en ${limit_p:,.2f}. TP: ${tp_p:,.2f} | SL: ${sl_p:,.2f}")
             return
@@ -253,7 +261,7 @@ class StrategyEngine:
                 hit_tp = h_price >= tp_p
                 hit_sl = l_price <= sl_p
                 if hit_tp and hit_sl:
-                    closed = True; exit_reason = "Stop Loss (-1.0%) [Simultáneo en barra]"; exit_p = sl_p; raw_move = -0.01 - 2*FEE_RATE
+                    closed = True; exit_reason = "Stop Loss (-1.0%) [Simultáneo]"; exit_p = sl_p; raw_move = -0.01 - 2*FEE_RATE
                 elif hit_tp:
                     closed = True; exit_reason = "Take Profit (+1.0%) 🎯"; exit_p = tp_p; raw_move = 0.01 - 2*FEE_RATE
                 elif hit_sl:
@@ -262,7 +270,7 @@ class StrategyEngine:
                 hit_tp = l_price <= tp_p
                 hit_sl = h_price >= sl_p
                 if hit_tp and hit_sl:
-                    closed = True; exit_reason = "Stop Loss (-1.0%) [Simultáneo en barra]"; exit_p = sl_p; raw_move = -0.01 - 2*FEE_RATE
+                    closed = True; exit_reason = "Stop Loss (-1.0%) [Simultáneo]"; exit_p = sl_p; raw_move = -0.01 - 2*FEE_RATE
                 elif hit_tp:
                     closed = True; exit_reason = "Take Profit (+1.0%) 🎯"; exit_p = tp_p; raw_move = 0.01 - 2*FEE_RATE
                 elif hit_sl:
@@ -291,6 +299,7 @@ class StrategyEngine:
                 self.notifier.notify_position_closed(
                     symbol=symbol, side=side, exit_time=now_str, exit_price=exit_p,
                     exit_reason=exit_reason, dollar_pnl=dpnl, net_return_pct=raw_move*100,
-                    win=dpnl > 0, new_capital=new_cap, new_hwm=new_hwm
+                    win=dpnl > 0, new_capital=new_cap, new_hwm=new_hwm,
+                    df_1h=df_1h, entry_price=entry_p
                 )
                 logger.info(f"🏁 {symbol} Posición cerrada por {exit_reason}. PnL: ${dpnl:+.4f} USD.")

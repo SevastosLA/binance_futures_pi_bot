@@ -1,12 +1,13 @@
 """
 Módulo de Persistencia en Base de Datos SQLite (Modo WAL).
-Garantiza tolerancia a fallos, cortes de energía y reinicios abruptos en la Raspberry Pi.
+Garantiza tolerancia a fallos, cortes de energía y evita bloqueos de base de datos.
 """
 
 import sqlite3
 import datetime
 import logging
-from typing import Dict, List, Optional, Any
+from contextlib import contextmanager
+from typing import Dict, List, Optional, Any, Generator
 from config import DB_PATH, SYMBOLS, INITIAL_CAPITAL, WEEKLY_DEPOSIT, MAX_DEPOSIT_TOTAL
 
 logger = logging.getLogger("DatabaseManager")
@@ -16,16 +17,27 @@ class DatabaseManager:
         self.db_path = db_path
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+    @contextmanager
+    def _get_connection(self) -> Generator[sqlite3.Connection, None, None]:
+        """Crea una conexión con timeout largo y garantiza su cierre al finalizar."""
+        conn = sqlite3.connect(self.db_path, timeout=60.0)
         conn.row_factory = sqlite3.Row
-        # Activar modo WAL para máxima concurrencia y protección ante cortes de energía
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self):
-        """Crea las tablas necesarias si no existen."""
+        """Inicializa la base de datos en modo WAL y crea las tablas."""
+        init_conn = sqlite3.connect(self.db_path, timeout=60.0)
+        init_conn.execute("PRAGMA journal_mode=WAL;")
+        init_conn.execute("PRAGMA synchronous=NORMAL;")
+        init_conn.close()
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
@@ -45,8 +57,8 @@ class DatabaseManager:
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS active_orders (
                 symbol TEXT PRIMARY KEY,
-                state INTEGER NOT NULL DEFAULT 0, -- 0: IDLE, 1: PENDING, 2: IN_POS
-                side TEXT,                        -- LONG / SHORT
+                state INTEGER NOT NULL DEFAULT 0,
+                side TEXT,
                 trigger_time TEXT,
                 entry_time TEXT,
                 limit_price REAL,
@@ -92,19 +104,16 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS telegram_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING, SENT, FAILED
+                status TEXT NOT NULL DEFAULT 'PENDING',
                 retry_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 sent_at TEXT
             );
             """)
-            conn.commit()
 
-        # Inicializar subcarteras si la BD es nueva
         self._bootstrap_subwallets()
 
     def _bootstrap_subwallets(self):
-        """Inicializa las subcarteras para los símbolos configurados si no existen."""
         n_symbols = len(SYMBOLS)
         sub_init = INITIAL_CAPITAL / n_symbols if n_symbols > 0 else 20.0
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -125,11 +134,7 @@ class DatabaseManager:
                     INSERT INTO active_orders (symbol, state, updated_at)
                     VALUES (?, 0, ?)
                     """, (sym, now_str))
-            conn.commit()
 
-    # -------------------------------------------------------------
-    # GESTIÓN DE SUBCARTERAS Y DCA
-    # -------------------------------------------------------------
     def get_subwallet(self, symbol: str) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -152,10 +157,8 @@ class DatabaseManager:
             SET capital = ?, hwm = ?, updated_at = ?
             WHERE symbol = ?
             """, (new_capital, new_hwm, now_str, symbol))
-            conn.commit()
 
     def process_weekly_dca(self) -> bool:
-        """Inyecta los aportes semanales si han transcurrido 7 días desde el último aporte."""
         all_wallets = self.get_all_subwallets()
         if not all_wallets:
             return False
@@ -185,14 +188,10 @@ class DatabaseManager:
                     SET capital = ?, hwm = ?, cum_deposited = ?, last_deposit_time = ?, updated_at = ?
                     WHERE symbol = ?
                     """, (new_cap, new_hwm, new_cum, now_str, now_str, sym))
-                conn.commit()
-            logger.info(f"💵 Aporte Semanal DCA ejecutado: +${WEEKLY_DEPOSIT:.2f} USD distribuidos entre {n_symbols} carteras.")
+            logger.info(f"💵 Aporte Semanal DCA ejecutado: +${WEEKLY_DEPOSIT:.2f} USD.")
             return True
         return False
 
-    # -------------------------------------------------------------
-    # GESTIÓN DE ÓRDENES Y POSICIONES ACTIVAS
-    # -------------------------------------------------------------
     def get_order_state(self, symbol: str) -> Dict[str, Any]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -213,7 +212,6 @@ class DatabaseManager:
                 tp_price = NULL, sl_price = NULL, updated_at = ?
             WHERE symbol = ?
             """, (side, trigger_time, limit_price, risk_usd, signal_ema, signal_close, now_str, symbol))
-            conn.commit()
 
     def set_position_filled(self, symbol: str, entry_time: str, fill_price: float, tp_price: float, sl_price: float):
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -224,7 +222,6 @@ class DatabaseManager:
             SET state = 2, entry_time = ?, fill_price = ?, tp_price = ?, sl_price = ?, updated_at = ?
             WHERE symbol = ?
             """, (entry_time, fill_price, tp_price, sl_price, now_str, symbol))
-            conn.commit()
 
     def reset_order_state(self, symbol: str):
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -237,11 +234,7 @@ class DatabaseManager:
                 signal_ema = NULL, signal_close = NULL, fill_price = NULL, updated_at = ?
             WHERE symbol = ?
             """, (now_str, symbol))
-            conn.commit()
 
-    # -------------------------------------------------------------
-    # REGISTRO HISTÓRICO DE TRADES
-    # -------------------------------------------------------------
     def record_completed_trade(self, trade_data: Dict[str, Any]):
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
@@ -261,11 +254,7 @@ class DatabaseManager:
                 trade_data["capital_before"], trade_data["capital_after"], trade_data["wallet_hwm"],
                 trade_data["cum_deposited_usd"], now_str
             ))
-            conn.commit()
 
-    # -------------------------------------------------------------
-    # COLA OFFLINE DE TELEGRAM (Resiliencia ante caídas de internet)
-    # -------------------------------------------------------------
     def enqueue_telegram_message(self, message: str):
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
@@ -274,7 +263,6 @@ class DatabaseManager:
             INSERT INTO telegram_outbox (message, status, created_at)
             VALUES (?, 'PENDING', ?)
             """, (message, now_str))
-            conn.commit()
 
     def get_pending_telegram_messages(self, limit: int = 10) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -296,7 +284,6 @@ class DatabaseManager:
             SET status = 'SENT', sent_at = ?
             WHERE id = ?
             """, (now_str, msg_id))
-            conn.commit()
 
     def increment_telegram_retry(self, msg_id: int):
         with self._get_connection() as conn:
@@ -306,4 +293,3 @@ class DatabaseManager:
             SET retry_count = retry_count + 1
             WHERE id = ?
             """, (msg_id,))
-            conn.commit()
