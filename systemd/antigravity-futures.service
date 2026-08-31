@@ -1,0 +1,25 @@
+[Unit]
+Description=Antigravity Binance Futures Trading Bot (Raspberry Pi Paper Trading)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/binance_futures_pi_bot
+ExecStart=/home/pi/binance_futures_pi_bot/.env/bin/python live_runner.py
+
+# Reinicio automático continuo ante cualquier falla o corte de red
+Restart=always
+RestartSec=10
+
+# Logging estándar hacia journalctl
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=binance-futures-bot
+
+# Variables de entorno
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
