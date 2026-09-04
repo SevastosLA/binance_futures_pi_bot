@@ -1,39 +1,35 @@
-#!/usr/bin/env python3
 """
-Orquestador Principal del Bot de Trading para Raspberry Pi (24/7 Live Runner).
-Maneja el bucle de eventos asíncrono, sincronización horaria, monitoreo de precios,
-recolección de telemetría de hardware, auto-recuperación ante fallos y envío de gráficos.
+Ejecutable Principal del Bot Cuantitativo 24/7 para Raspberry Pi.
+Estrategia Híbrida Cripto (La Campeona 2% + El Francotirador 1%).
+Orquesta la ingesta de datos, evaluación de señales horarias en 1h,
+gestión intrabarra en 15m/tiempo real, persistencia SQLite WAL y alertas de Telegram.
 """
 
 import os
 import sys
-
-# Asegurar que el directorio del bot esté en sys.path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import time
 import signal
 import psutil
 import logging
 import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 from config import (
-    SYMBOLS, POLLING_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_HOURS,
-    LOG_LEVEL, LOGS_DIR, TRADING_MODE
+    SYMBOLS, TRADING_MODE, POLLING_INTERVAL_SECONDS,
+    HEARTBEAT_INTERVAL_HOURS, LOGS_DIR
 )
 from storage.database import DatabaseManager
-from notifier.telegram_bot import TelegramNotifier
 from feed.binance_feed import BinanceFuturesFeed
+from notifier.telegram_bot import TelegramNotifier
 from engine.strategy_engine import StrategyEngine
 
-# Configuración de Logging con rotación simple en archivo y consola
-log_file = os.path.join(LOGS_DIR, "bot_runner.log")
+# Configuración de Logging con rotación diaria en archivo y salida por consola
+log_filename = os.path.join(LOGS_DIR, f"bot_{datetime.datetime.utcnow().strftime('%Y%m%d')}.log")
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] (%(name)s): %(message)s",
     handlers=[
-        logging.FileHandler(log_file, encoding="utf-8"),
+        logging.FileHandler(log_filename, encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -49,7 +45,7 @@ class BotRunner:
         self.db = DatabaseManager()
         self.notifier = TelegramNotifier(self.db)
         self.feed = BinanceFuturesFeed()
-        self.engine = StrategyEngine(self.db, self.notifier)
+        self.engine = StrategyEngine(self.db, self.notifier, feed=self.feed)
         
         # Estado en memoria para sincronización de velas
         self.last_processed_1h: Dict[str, Optional[datetime.datetime]] = {s: None for s in SYMBOLS}
@@ -74,7 +70,9 @@ class BotRunner:
                 if "coretemp" in temps and temps["coretemp"]:
                     cpu_temp = f"{temps['coretemp'][0].current:.1f}°C"
                 elif "cpu_thermal" in temps and temps["cpu_thermal"]:
-                    cpu_temp = f"{temps['cpu_thermal'][0].current:.1f}°C"
+                    cpu_thermal = temps["cpu_thermal"]
+                    if cpu_thermal:
+                        cpu_temp = f"{cpu_thermal[0].current:.1f}°C"
         except Exception:
             pass
 
@@ -96,9 +94,10 @@ class BotRunner:
     def startup(self):
         """Mensaje inicial y verificación de estado en el arranque."""
         logger.info("=" * 70)
-        logger.info(" 🤖 INICIANDO ANTIGRAVITY BINANCE FUTURES BOT (RASPBERRY PI)")
+        logger.info(" 🤖 INICIANDO ANTIGRAVITY BINANCE FUTURES BOT (MODO HÍBRIDO)")
         logger.info(f" Modo: {TRADING_MODE} | Activos: {', '.join(SYMBOLS)}")
-        logger.info(f" Gráficos en Alertas: ACTIVADOS 📊 (Matplotlib Headless)")
+        logger.info(" Estrategia: La Campeona 2% + El Francotirador 1%")
+        logger.info(" Gráficos en Alertas: ACTIVADOS 📊 (Matplotlib Headless)")
         logger.info("=" * 70)
 
         startup_msg = (
@@ -106,11 +105,13 @@ class BotRunner:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 <b>Modo:</b> {TRADING_MODE} (Binance Futures)\n"
             f"🪙 <b>Activos Vigilados:</b> <code>{', '.join(SYMBOLS)}</code>\n"
+            f"🏹 <b>Estrategia:</b> Híbrida (La Campeona 2% + El Francotirador 1%)\n"
             f"📊 <b>Gráficos en Alertas:</b> Activados (Visual Chart Suite)\n"
-            f"🛡️ <b>Gestión:</b> 2% High-Water Mark + DCA Semanal\n"
+            f"🛡️ <b>Gestión:</b> High-Water Mark Asimétrico (3% → 2%) + DCA Semanal\n"
             f"⏱️ <b>Hora Arranque:</b> {self.start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC"
         )
         self.notifier.send_message(startup_msg)
+        self.notifier.start_command_listener()
 
     def run(self):
         self.startup()
@@ -147,15 +148,15 @@ class BotRunner:
                     except Exception as e:
                         logger.error(f"Error procesando vela 1h para {sym}: {e}")
 
-                # 4. Evaluar Ejecución Intrabarra / Precios en Tiempo Real
+                # 4. Evaluar Ejecución Intrabarra / Precios en Tiempo Real (15m y Ticks)
                 try:
                     current_prices = self.feed.fetch_all_latest_prices(SYMBOLS)
                     for sym in SYMBOLS:
                         price = current_prices.get(sym)
                         if price:
                             df_15m = self.feed.fetch_klines(sym, interval="15m", limit=3)
-                            h_15m = float(df_15m.iloc[-1]["High"]) if df_15m is not None else price
-                            l_15m = float(df_15m.iloc[-1]["Low"]) if df_15m is not None else price
+                            h_15m = float(df_15m.iloc[-1]["High"]) if df_15m is not None and not df_15m.empty else price
+                            l_15m = float(df_15m.iloc[-1]["Low"]) if df_15m is not None and not df_15m.empty else price
                             self.engine.evaluate_realtime_tick(sym, current_price=price, candle_15m_high=h_15m, candle_15m_low=l_15m)
                 except Exception as e:
                     logger.error(f"Error en evaluación intrabarra en tiempo real: {e}")
@@ -188,6 +189,7 @@ class BotRunner:
             time.sleep(POLLING_INTERVAL_SECONDS)
 
         logger.info("Bot detenido de forma segura.")
+        self.notifier.stop_command_listener()
         self.notifier.send_message(
             f"🛑 <b>BOT DETENIDO MANUALMENTE</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"

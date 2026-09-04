@@ -24,7 +24,12 @@ SYMBOLS = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()]
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "100.0"))
 WEEKLY_DEPOSIT = float(os.getenv("WEEKLY_DEPOSIT", "20.0"))
 MAX_DEPOSIT_TOTAL = float(os.getenv("MAX_DEPOSIT_TOTAL", "1000.0"))
-RISK_PCT_HWM = float(os.getenv("RISK_PCT_HWM", "0.02"))
+
+# Gestión de Riesgo Asimétrico Híbrido (La Campeona 2% + El Francotirador 1%)
+RISK_CAMPEONA = float(os.getenv("RISK_CAMPEONA", "0.02"))  # 2.0% HWM
+RISK_FRANCO = float(os.getenv("RISK_FRANCO", "0.01"))      # 1.0% HWM
+RISK_HYBRID_TOTAL = RISK_CAMPEONA + RISK_FRANCO             # 3.0% HWM inicial
+RISK_PCT_HWM = RISK_HYBRID_TOTAL                            # Alias por compatibilidad
 
 # Parámetros de la Estrategia
 EMA_PERIOD = 200
@@ -32,7 +37,17 @@ LIMIT_DISCOUNT_PCT = 0.01   # 1.0% de descuento en el retroceso
 TP_PCT = 0.01               # +1.0% Take Profit
 SL_PCT = 0.01               # -1.0% Stop Loss
 MAX_STREAK_EXIT = 4         # Cierre a mercado en la 4ª vela consecutiva
-FEE_RATE = 0.0004           # 0.04% comisión estimada por lado en Binance Futures
+
+# Ciclo de Vida de Órdenes Híbridas (Minutos y Velas 15m)
+MAX_FILL_MINUTES_FRANCO = 15
+MAX_FILL_MINUTES_CAMPEONA = 60
+MAX_FILL_CANDLES_15M_FRANCO = 1
+MAX_FILL_CANDLES_15M_CAMPEONA = 4
+
+# Estructura de Comisiones Binance Futures
+FEE_MAKER = 0.0002          # 0.02% para órdenes Limit (Entrada y Take Profit)
+FEE_TAKER = 0.0004          # 0.04% para órdenes Taker/Market (Stop Loss y Salidas Forzosas)
+FEE_RATE = FEE_TAKER        # Alias por compatibilidad
 
 # Configuración del Intervalo y Polling
 POLLING_INTERVAL_SECONDS = int(os.getenv("POLLING_INTERVAL_SECONDS", "15"))

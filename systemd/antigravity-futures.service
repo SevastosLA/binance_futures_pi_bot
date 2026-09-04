@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/binance_futures_pi_bot
-ExecStart=/home/pi/binance_futures_pi_bot/.env/bin/python live_runner.py
+ExecStart=/home/pi/binance_futures_pi_bot/.venv/bin/python live_runner.py
 
 # Reinicio automático continuo ante cualquier falla o corte de red
 Restart=always

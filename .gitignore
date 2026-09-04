@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .venv/
 env/
+ESPECIFICACION_TECNICA_BOT_HIBRIDO_CRIPTO.md
 
 # SQLite Database & State
 *.db

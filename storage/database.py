@@ -1,6 +1,7 @@
 """
 Módulo de Persistencia en Base de Datos SQLite (Modo WAL).
 Garantiza tolerancia a fallos, cortes de energía y evita bloqueos de base de datos.
+Soporta el modelo de dimensionamiento asimétrico híbrido (La Campeona 2% + El Francotirador 1%).
 """
 
 import sqlite3
@@ -32,7 +33,7 @@ class DatabaseManager:
             conn.close()
 
     def _init_db(self):
-        """Inicializa la base de datos en modo WAL y crea las tablas."""
+        """Inicializa la base de datos en modo WAL y crea/migra las tablas."""
         init_conn = sqlite3.connect(self.db_path, timeout=60.0)
         init_conn.execute("PRAGMA journal_mode=WAL;")
         init_conn.execute("PRAGMA synchronous=NORMAL;")
@@ -53,7 +54,7 @@ class DatabaseManager:
             );
             """)
 
-            # 2. Tabla de Estado de Órdenes y Posiciones Activas
+            # 2. Tabla de Estado de Órdenes y Posiciones Activas (Soporte Híbrido)
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS active_orders (
                 symbol TEXT PRIMARY KEY,
@@ -68,6 +69,10 @@ class DatabaseManager:
                 signal_ema REAL,
                 signal_close REAL,
                 fill_price REAL,
+                franco_active INTEGER DEFAULT 1,
+                candles_15m_elapsed INTEGER DEFAULT 0,
+                effective_risk_pct REAL DEFAULT 0.03,
+                execution_type TEXT,
                 updated_at TEXT NOT NULL
             );
             """)
@@ -95,11 +100,13 @@ class DatabaseManager:
                 capital_after REAL NOT NULL,
                 wallet_hwm REAL NOT NULL,
                 cum_deposited_usd REAL NOT NULL,
+                execution_type TEXT,
+                risk_pct REAL,
                 created_at TEXT NOT NULL
             );
             """)
 
-            # 4. Tabla Cola de Mensajes Telegram Offline
+            # 4. Cola de Mensajes Offline para Telegram
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS telegram_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,15 +118,33 @@ class DatabaseManager:
             );
             """)
 
-        self._bootstrap_subwallets()
+            # Migraciones automáticas y seguras para bases de datos existentes
+            columns_to_add_orders = [
+                ("franco_active", "INTEGER DEFAULT 1"),
+                ("candles_15m_elapsed", "INTEGER DEFAULT 0"),
+                ("effective_risk_pct", "REAL DEFAULT 0.03"),
+                ("execution_type", "TEXT")
+            ]
+            for col_name, col_def in columns_to_add_orders:
+                try:
+                    cursor.execute(f"ALTER TABLE active_orders ADD COLUMN {col_name} {col_def};")
+                except sqlite3.OperationalError:
+                    pass  # Ya existe
 
-    def _bootstrap_subwallets(self):
-        n_symbols = len(SYMBOLS)
-        sub_init = INITIAL_CAPITAL / n_symbols if n_symbols > 0 else 20.0
-        now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            columns_to_add_history = [
+                ("execution_type", "TEXT"),
+                ("risk_pct", "REAL")
+            ]
+            for col_name, col_def in columns_to_add_history:
+                try:
+                    cursor.execute(f"ALTER TABLE trade_history ADD COLUMN {col_name} {col_def};")
+                except sqlite3.OperationalError:
+                    pass
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
+            # 5. Inicializar Subcarteras y Estados si no existen
+            now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            sub_init = INITIAL_CAPITAL / len(SYMBOLS)
+
             for sym in SYMBOLS:
                 cursor.execute("SELECT symbol FROM subwallets WHERE symbol = ?", (sym,))
                 if not cursor.fetchone():
@@ -201,7 +226,13 @@ class DatabaseManager:
                 return dict(row)
             return {"symbol": symbol, "state": 0}
 
-    def set_pending_order(self, symbol: str, side: str, trigger_time: str, limit_price: float, risk_usd: float, signal_ema: float, signal_close: float):
+    def set_pending_order(
+        self, symbol: str, side: str, trigger_time: str, limit_price: float,
+        risk_usd: float, signal_ema: float, signal_close: float,
+        franco_active: int = 1, candles_15m_elapsed: int = 0,
+        effective_risk_pct: float = 0.03
+    ):
+        """Registra una orden pendiente híbrida (3% inicial: Campeona 2% + Francotirador 1%)."""
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -209,21 +240,62 @@ class DatabaseManager:
             UPDATE active_orders
             SET state = 1, side = ?, trigger_time = ?, limit_price = ?, risk_usd = ?,
                 signal_ema = ?, signal_close = ?, entry_time = NULL, fill_price = NULL,
-                tp_price = NULL, sl_price = NULL, updated_at = ?
+                tp_price = NULL, sl_price = NULL, franco_active = ?, candles_15m_elapsed = ?,
+                effective_risk_pct = ?, execution_type = NULL, updated_at = ?
             WHERE symbol = ?
-            """, (side, trigger_time, limit_price, risk_usd, signal_ema, signal_close, now_str, symbol))
+            """, (side, trigger_time, limit_price, risk_usd, signal_ema, signal_close,
+                  franco_active, candles_15m_elapsed, effective_risk_pct, now_str, symbol))
 
-    def set_position_filled(self, symbol: str, entry_time: str, fill_price: float, tp_price: float, sl_price: float):
+    def expire_franco_tranche(self, symbol: str, new_risk_usd: float):
+        """Expira el tramo Francotirador tras 15 minutos sin fill, reduciendo el riesgo a 2.0% HWM."""
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
             UPDATE active_orders
-            SET state = 2, entry_time = ?, fill_price = ?, tp_price = ?, sl_price = ?, updated_at = ?
-            WHERE symbol = ?
-            """, (entry_time, fill_price, tp_price, sl_price, now_str, symbol))
+            SET franco_active = 0, effective_risk_pct = 0.02, risk_usd = ?, updated_at = ?
+            WHERE symbol = ? AND state = 1
+            """, (new_risk_usd, now_str, symbol))
+
+    def update_candles_elapsed(self, symbol: str, count: int):
+        """Actualiza el contador de periodos/velas de 15m transcurridos."""
+        now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+            UPDATE active_orders
+            SET candles_15m_elapsed = ?, updated_at = ?
+            WHERE symbol = ? AND state = 1
+            """, (count, now_str, symbol))
+
+    def set_position_filled(
+        self, symbol: str, entry_time: str, fill_price: float,
+        tp_price: float, sl_price: float,
+        execution_type: str = "CAMPEONA_NORMAL_2PCT",
+        effective_risk_pct: float = 0.02,
+        risk_usd: Optional[float] = None
+    ):
+        """Registra la posición activa con su tipo de ejecución (Francotirador 3% vs Campeona 2%)."""
+        now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if risk_usd is not None:
+                cursor.execute("""
+                UPDATE active_orders
+                SET state = 2, entry_time = ?, fill_price = ?, tp_price = ?, sl_price = ?,
+                    execution_type = ?, effective_risk_pct = ?, risk_usd = ?, updated_at = ?
+                WHERE symbol = ?
+                """, (entry_time, fill_price, tp_price, sl_price, execution_type, effective_risk_pct, risk_usd, now_str, symbol))
+            else:
+                cursor.execute("""
+                UPDATE active_orders
+                SET state = 2, entry_time = ?, fill_price = ?, tp_price = ?, sl_price = ?,
+                    execution_type = ?, effective_risk_pct = ?, updated_at = ?
+                WHERE symbol = ?
+                """, (entry_time, fill_price, tp_price, sl_price, execution_type, effective_risk_pct, now_str, symbol))
 
     def reset_order_state(self, symbol: str):
+        """Restablece el estado de un símbolo a IDLE (0)."""
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -231,20 +303,25 @@ class DatabaseManager:
             UPDATE active_orders
             SET state = 0, side = NULL, trigger_time = NULL, entry_time = NULL,
                 limit_price = NULL, tp_price = NULL, sl_price = NULL, risk_usd = NULL,
-                signal_ema = NULL, signal_close = NULL, fill_price = NULL, updated_at = ?
+                signal_ema = NULL, signal_close = NULL, fill_price = NULL, franco_active = 1,
+                candles_15m_elapsed = 0, effective_risk_pct = 0.03, execution_type = NULL, updated_at = ?
             WHERE symbol = ?
             """, (now_str, symbol))
 
     def record_completed_trade(self, trade_data: Dict[str, Any]):
+        """Registra una operación completada en la tabla histórica con métricas y tipo de ejecución."""
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        execution_type = trade_data.get("execution_type", "CAMPEONA_NORMAL_2PCT")
+        risk_pct = trade_data.get("risk_pct", 0.02)
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
             INSERT INTO trade_history (
                 symbol, side, trigger_time, entry_time, exit_time, entry_price, exit_price,
                 tp_price, sl_price, exit_reason, raw_return_pct, net_return_pct, risk_usd,
-                dollar_pnl, win, capital_before, capital_after, wallet_hwm, cum_deposited_usd, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dollar_pnl, win, capital_before, capital_after, wallet_hwm, cum_deposited_usd,
+                execution_type, risk_pct, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade_data["symbol"], trade_data["side"], trade_data["trigger_time"],
                 trade_data["entry_time"], trade_data["exit_time"], trade_data["entry_price"],
@@ -252,7 +329,7 @@ class DatabaseManager:
                 trade_data["exit_reason"], trade_data["raw_return_pct"], trade_data["net_return_pct"],
                 trade_data["risk_usd"], trade_data["dollar_pnl"], 1 if trade_data["win"] else 0,
                 trade_data["capital_before"], trade_data["capital_after"], trade_data["wallet_hwm"],
-                trade_data["cum_deposited_usd"], now_str
+                trade_data["cum_deposited_usd"], execution_type, risk_pct, now_str
             ))
 
     def enqueue_telegram_message(self, message: str):
