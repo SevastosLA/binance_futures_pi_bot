@@ -1,0 +1,180 @@
+//@version=5
+indicator("Bot Híbrido Cripto - Niveles y Señales [Antigravity]", shorttitle="Híbrido 2%+1%", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// -----------------------------------------------------------------------------
+// 1. CONFIGURACIÓN Y PARÁMETROS
+// -----------------------------------------------------------------------------
+grp_strategy = "Estrategia Cuantitativa Híbrida"
+emaPeriod    = input.int(200, "Período EMA Macro", minval=10, group=grp_strategy)
+discountPct  = input.float(1.0, "Descuento Orden Límite (%)", step=0.1, group=grp_strategy) / 100.0
+tpPct        = input.float(1.0, "Take Profit (+%)", step=0.1, group=grp_strategy) / 100.0
+slPct        = input.float(1.0, "Stop Loss (-%)", step=0.1, group=grp_strategy) / 100.0
+
+grp_risk     = "Gestión de Riesgo Asimétrico"
+riskFranco   = input.float(1.0, "Tramo Francotirador (% HWM)", step=0.5, group=grp_risk)
+riskCampeona = input.float(2.0, "Tramo Campeona (% HWM)", step=0.5, group=grp_risk)
+
+grp_display  = "Visualización y Niveles en Gráfico"
+showLines    = input.bool(true, "Proyectar Líneas de Límite, TP y SL", group=grp_display)
+showBoxes    = input.bool(true, "Sombreado de Zonas (TP / SL)", group=grp_display)
+showLabels   = input.bool(true, "Etiquetas de Señal y Objetivos", group=grp_display)
+showEma      = input.bool(true, "Mostrar EMA 200 en Gráfico", group=grp_display)
+showHud      = input.bool(true, "Mostrar Panel HUD en Pantalla", group=grp_display)
+lineDuration = input.int(4, "Velas de Proyección de la Orden", minval=1, maxval=20, tooltip="4 velas de 15m = 60 minutos", group=grp_display)
+
+// Colores Institucionales Oscuros
+c_ema        = #ffab00
+c_long       = #00e676
+c_short      = #ff1744
+c_limit      = #00d4ff
+c_text       = #f8fafc
+c_bg         = #0b1322
+
+// -----------------------------------------------------------------------------
+// 2. CÁLCULO DE INDICADORES Y RACHAS
+// -----------------------------------------------------------------------------
+ema200 = ta.ema(close, emaPeriod)
+
+// Definición de Color de Vela
+isRed   = close < open
+isGreen = close > open
+
+// Cálculo de Racha de Velas Consecutivas Cerradas
+var int redStreak   = 0
+var int greenStreak = 0
+
+if isRed
+    redStreak   += 1
+    greenStreak := 0
+else if isGreen
+    greenStreak += 1
+    redStreak   := 0
+else
+    redStreak   := 0
+    greenStreak := 0
+
+// -----------------------------------------------------------------------------
+// 3. CONDICIONES DE SEÑAL
+// -----------------------------------------------------------------------------
+// LONG: Cierre sobre EMA 200 y primera vela roja de retroceso (redStreak == 1)
+longCondition  = (close > ema200) and isRed and (redStreak == 1)
+
+// SHORT: Cierre bajo EMA 200 y primera vela verde de retroceso (greenStreak == 1)
+shortCondition = (close < ema200) and isGreen and (greenStreak == 1)
+
+// -----------------------------------------------------------------------------
+// 4. CÁLCULO DE NIVELES CUANTITATIVOS
+// -----------------------------------------------------------------------------
+var float entryPrice = na
+var float tpPrice    = na
+var float slPrice    = na
+var string lastSide  = "ESPERANDO"
+
+if longCondition
+    entryPrice := close * (1.0 - discountPct) // -1.0% de descuento
+    tpPrice    := entryPrice * (1.0 + tpPct)   // +1.0%
+    slPrice    := entryPrice * (1.0 - slPct)   // -1.0%
+    lastSide   := "LONG"
+
+if shortCondition
+    entryPrice := close * (1.0 + discountPct) // +1.0% de recargo
+    tpPrice    := entryPrice * (1.0 - tpPct)   // +1.0%
+    slPrice    := entryPrice * (1.0 + slPct)   // -1.0%
+    lastSide   := "SHORT"
+
+// -----------------------------------------------------------------------------
+// 5. RENDERIZADO VISUAL EN EL GRÁFICO
+// -----------------------------------------------------------------------------
+// Trazo de la EMA 200
+plot(showEma ? ema200 : na, "EMA 200", color=c_ema, linewidth=2)
+
+// Señales visuales sobre las velas
+plotshape(longCondition, title="Señal LONG", style=shape.triangleup, location=location.belowbar, color=c_long, size=size.small, text="LONG\n-1%", textcolor=c_text)
+plotshape(shortCondition, title="Señal SHORT", style=shape.triangledown, location=location.abovebar, color=c_short, size=size.small, text="SHORT\n+1%", textcolor=c_text)
+
+// Dibujo de Líneas y Cajas Proyectadas
+if (longCondition or shortCondition) and showLines
+    sideColor = longCondition ? c_long : c_short
+    xStart    = bar_index
+    xEnd      = bar_index + lineDuration
+
+    // Línea de Entrada Límite (-1.0%)
+    line.new(xStart, entryPrice, xEnd, entryPrice, xloc=xloc.bar_index, color=c_limit, width=2, style=line.style_dashed)
+    
+    // Línea de Take Profit (+1.0%)
+    line.new(xStart, tpPrice, xEnd, tpPrice, xloc=xloc.bar_index, color=c_long, width=2, style=line.style_dotted)
+    
+    // Línea de Stop Loss (-1.0%)
+    line.new(xStart, slPrice, xEnd, slPrice, xloc=xloc.bar_index, color=c_short, width=2, style=line.style_dotted)
+
+    // Sombreado de Zonas Objetivo (Transparente)
+    if showBoxes
+        // Zona Ganancia (Verde translúcido)
+        box.new(xStart, math.max(entryPrice, tpPrice), xEnd, math.min(entryPrice, tpPrice), xloc=xloc.bar_index, border_color=color.new(c_long, 70), bgcolor=color.new(c_long, 88))
+        // Zona Pérdida (Roja translúcida)
+        box.new(xStart, math.max(entryPrice, slPrice), xEnd, math.min(entryPrice, slPrice), xloc=xloc.bar_index, border_color=color.new(c_short, 70), bgcolor=color.new(c_short, 88))
+
+    // Etiquetas informativas con detalle de la mecánica híbrida
+    if showLabels
+        labelTxt = (longCondition ? "🟢 ORDEN HÍBRIDA LONG" : "🔴 ORDEN HÍBRIDA SHORT") + "\n" +
+                   "━━━━━━━━━━━━━━━━━━\n" +
+                   "🎯 Entrada: $" + str.tostring(entryPrice, "#.##") + "\n" +
+                   "🟢 TP (+1.0%): $" + str.tostring(tpPrice, "#.##") + "\n" +
+                   "🔴 SL (-1.0%): $" + str.tostring(slPrice, "#.##") + "\n" +
+                   "━━━━━━━━━━━━━━━━━━\n" +
+                   "⚡ Min 0-15 (Vela 1): 3.0% Riesgo (Francotirador Boost)\n" +
+                   "🛡️ Min 15-60 (Velas 2-4): 2.0% Riesgo (La Campeona)\n" +
+                   "⌛ Expiración: Cancelar orden a los 60 min"
+
+        labelY = longCondition ? slPrice : tpPrice
+        labelStyle = longCondition ? label.style_label_up : label.style_label_down
+        label.new(xStart, labelY, text=labelTxt, xloc=xloc.bar_index, yloc=yloc.price, color=color.new(c_bg, 10), textcolor=c_text, style=labelStyle, size=size.normal)
+
+// -----------------------------------------------------------------------------
+// 6. PANEL HUD INFORMATIVO (DASHBOARD ON-CHART)
+// -----------------------------------------------------------------------------
+var table hud = table.new(position.top_right, 2, 8, bgcolor=color.new(c_bg, 15), border_color=color.new(#1e293b, 30), border_width=1)
+
+if barstate.islast and showHud
+    trendStr   = close > ema200 ? "ALCISTA (Sobre EMA)" : "BAJISTA (Bajo EMA)"
+    trendCol   = close > ema200 ? c_long : c_short
+    streakStr  = redStreak > 0 ? "Roja (" + str.tostring(redStreak) + ")" : greenStreak > 0 ? "Verde (" + str.tostring(greenStreak) + ")" : "DoJi"
+    streakCol  = redStreak > 0 ? c_short : greenStreak > 0 ? c_long : c_text
+
+    // Título del Dashboard
+    table.cell(hud, 0, 0, "BOT HÍBRIDO CRIPTO", bgcolor=color.new(#1e293b, 20), text_color=c_text, text_size=size.small)
+    table.cell(hud, 1, 0, "CAMPEONA + FRANCOTIRADOR", bgcolor=color.new(#1e293b, 20), text_color=#ffab00, text_size=size.small)
+
+    // Tendencia Macro
+    table.cell(hud, 0, 1, "Tendencia Macro:", text_color=#8a99ad, text_size=size.small)
+    table.cell(hud, 1, 1, trendStr, text_color=trendCol, text_size=size.small)
+
+    // Racha Actual
+    table.cell(hud, 0, 2, "Racha de Color:", text_color=#8a99ad, text_size=size.small)
+    table.cell(hud, 1, 2, streakStr, text_color=streakCol, text_size=size.small)
+
+    // Última Señal
+    table.cell(hud, 0, 3, "Última Señal:", text_color=#8a99ad, text_size=size.small)
+    table.cell(hud, 1, 3, lastSide, text_color=lastSide == "LONG" ? c_long : lastSide == "SHORT" ? c_short : c_text, text_size=size.small)
+
+    // Entrada Límite
+    table.cell(hud, 0, 4, "Precio Límite (-1%):", text_color=#8a99ad, text_size=size.small)
+    table.cell(hud, 1, 4, not na(entryPrice) ? "$" + str.tostring(entryPrice, "#.##") : "--", text_color=c_limit, text_size=size.small)
+
+    // Take Profit (+1%)
+    table.cell(hud, 0, 5, "Take Profit (+1%):", text_color=#8a99ad, text_size=size.small)
+    table.cell(hud, 1, 5, not na(tpPrice) ? "$" + str.tostring(tpPrice, "#.##") : "--", text_color=c_long, text_size=size.small)
+
+    // Stop Loss (-1%)
+    table.cell(hud, 0, 6, "Stop Loss (-1%):", text_color=#8a99ad, text_size=size.small)
+    table.cell(hud, 1, 6, not na(slPrice) ? "$" + str.tostring(slPrice, "#.##") : "--", text_color=c_short, text_size=size.small)
+
+    // Régimen de Riesgo Híbrido
+    table.cell(hud, 0, 7, "Régimen Híbrido:", text_color=#8a99ad, text_size=size.small)
+    table.cell(hud, 1, 7, "3.0% (15m) → 2.0% (60m)", text_color=#38bdf8, text_size=size.small)
+
+// -----------------------------------------------------------------------------
+// 7. ALERTAS PARA TRADINGVIEW (ALERTCONDITIONS)
+// -----------------------------------------------------------------------------
+alertcondition(longCondition,  title="[HÍBRIDO] Señal LONG Disparada",  message="🟢 SEÑAL LONG HÍBRIDA en {{ticker}} (Cierre: {{close}}). Orden Límite (-1.0%): {{plot_0}}. Riesgo Inicial: 3% HWM.")
+alertcondition(shortCondition, title="[HÍBRIDO] Señal SHORT Disparada", message="🔴 SEÑAL SHORT HÍBRIDA en {{ticker}} (Cierre: {{close}}). Orden Límite (+1.0%): {{plot_0}}. Riesgo Inicial: 3% HWM.")
