@@ -6,8 +6,11 @@ Carga variables de entorno desde .env y expone constantes tipadas.
 import os
 from dotenv import load_dotenv
 
-# Cargar variables de entorno desde .env si existe
-load_dotenv()
+# Rutas de Archivos Locales
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Cargar variables de entorno desde .env del proyecto
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # Credenciales de Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
