@@ -367,8 +367,19 @@ def run_tests():
             current_time=tick_15m
         )
         order_sync_15m = db.get_order_state(symbol)
-        assert order_sync_15m["state"] == 1, "A los 15 min la orden debe seguir PENDIENTE (state=1)"
         assert order_sync_15m["franco_active"] == 0, "A los 15 min el Francotirador debe EXPIRAR"
+
+        # Simular ticks subsecuentes (minutos 16, 20, 30, 45) para asegurar que NO se re-dispara la alerta
+        for extra_min in [16, 20, 30, 45]:
+            subsequent_tick = expected_trigger_dt + datetime.timedelta(minutes=extra_min)
+            engine.evaluate_realtime_tick(
+                symbol=symbol,
+                current_price=order_sync["limit_price"] + 100.0,
+                current_time=subsequent_tick
+            )
+            state_sub = db.get_order_state(symbol)
+            assert state_sub["state"] == 1, f"En min {extra_min} la orden debe seguir viva"
+            assert state_sub["franco_active"] == 0, f"En min {extra_min} franco_active DEBE PERMANECER EN 0"
 
         # Evaluar a los 60 minutos exactos + 1 segundo: cancelación total
         tick_60m = expected_trigger_dt + datetime.timedelta(minutes=60, seconds=1)

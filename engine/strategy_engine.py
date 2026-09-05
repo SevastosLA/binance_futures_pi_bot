@@ -241,7 +241,8 @@ class StrategyEngine:
             side = order_state["side"]
             limit_p = float(order_state["limit_price"])
             trigger_t_str = order_state["trigger_time"]
-            franco_active = int(order_state.get("franco_active", 1) or 1)
+            raw_franco = order_state.get("franco_active")
+            franco_active = int(raw_franco) if raw_franco is not None else 1
             
             # Calcular tiempo transcurrido desde la emisión de la señal
             try:
