@@ -329,8 +329,60 @@ def run_tests():
         for line in csv_content.strip().split("\n")[:4]:
             print(f"     {line[:110]}...")
 
+        # -------------------------------------------------------------
+        # TEST 10: SINCRONIZACIÓN TEMPORAL Y PREVENCIÓN DE EXPIRACIÓN PREMATURA
+        # -------------------------------------------------------------
+        print("\n[Test 10] Sincronización Temporal (Prevención de Expiración Prematura)...")
+        # Limpiar estado previo
+        db.reset_order_state(symbol)
+        df_sync = create_synthetic_df_1h(trend="BULLISH", num_bars=250, last_streak=1)
+        closed_open_time = pd.to_datetime(df_sync.iloc[-2]["Open Time"])
+        expected_trigger_dt = closed_open_time + datetime.timedelta(hours=1)
+        expected_trigger_str = expected_trigger_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        engine.evaluate_hourly_close(symbol, df_sync)
+        order_sync = db.get_order_state(symbol)
+        assert order_sync["state"] == 1, "Debe haber orden pendiente colocada"
+        assert order_sync["trigger_time"] == expected_trigger_str, (
+            f"trigger_time debe ser la hora de cierre ({expected_trigger_str}), "
+            f"obtenido: {order_sync['trigger_time']}"
+        )
+
+        # Evaluar tick 20 segundos después de la emisión de la orden (como en live)
+        tick_20s = expected_trigger_dt + datetime.timedelta(seconds=20)
+        engine.evaluate_realtime_tick(
+            symbol=symbol,
+            current_price=order_sync["limit_price"] + 100.0,  # Sin fill
+            current_time=tick_20s
+        )
+        order_sync_20s = db.get_order_state(symbol)
+        assert order_sync_20s["state"] == 1, "A los 20 segundos la orden debe seguir PENDIENTE (state=1)"
+        assert order_sync_20s["franco_active"] == 1, "A los 20 segundos el Francotirador debe seguir ACTIVO"
+
+        # Evaluar a los 15 minutos exactos + 1 segundo: expiración solo de Francotirador
+        tick_15m = expected_trigger_dt + datetime.timedelta(minutes=15, seconds=1)
+        engine.evaluate_realtime_tick(
+            symbol=symbol,
+            current_price=order_sync["limit_price"] + 100.0,
+            current_time=tick_15m
+        )
+        order_sync_15m = db.get_order_state(symbol)
+        assert order_sync_15m["state"] == 1, "A los 15 min la orden debe seguir PENDIENTE (state=1)"
+        assert order_sync_15m["franco_active"] == 0, "A los 15 min el Francotirador debe EXPIRAR"
+
+        # Evaluar a los 60 minutos exactos + 1 segundo: cancelación total
+        tick_60m = expected_trigger_dt + datetime.timedelta(minutes=60, seconds=1)
+        engine.evaluate_realtime_tick(
+            symbol=symbol,
+            current_price=order_sync["limit_price"] + 100.0,
+            current_time=tick_60m
+        )
+        order_sync_60m = db.get_order_state(symbol)
+        assert order_sync_60m["state"] == 0, "A los 60 min la orden debe CANCELARSE (state=0)"
+        print("  ✅ Sincronización temporal validada al 100%. Vida útil de 15m y 60m respetada estrictamente.")
+
         print("\n" + "=" * 80)
-        print(" 🎉 ¡TODAS LAS 9 PRUEBAS CUANTITATIVAS PASARON AL 100%!")
+        print(" 🎉 ¡TODAS LAS 10 PRUEBAS CUANTITATIVAS PASARON AL 100%!")
         print(" El modelo híbrido funciona con exactitud matemática rigurosa.")
         print("=" * 80)
         return True

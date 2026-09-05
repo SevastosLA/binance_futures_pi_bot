@@ -58,7 +58,10 @@ class StrategyEngine:
         c_1h = float(closed_candle["Close"])
         o_1h = float(closed_candle["Open"])
         ema_val = float(closed_candle["EMA_200"])
-        candle_time_str = pd.to_datetime(closed_candle["Open Time"]).strftime("%Y-%m-%d %H:%M:%S")
+        # La señal y la orden límite se originan al CIERRE de la vela horaria (Open Time + 1h),
+        # que es cuando la orden entra al mercado y comienzan a correr los 15 min (Francotirador) y 60 min (Campeona).
+        candle_close_dt = pd.to_datetime(closed_candle["Open Time"]) + pd.Timedelta(hours=1)
+        candle_time_str = candle_close_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         # Calcular rachas de color de velas consecutivas cerradas
         closes = df_1h["Close"].values[:-1]
