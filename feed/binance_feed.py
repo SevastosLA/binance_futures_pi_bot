@@ -42,7 +42,7 @@ class BinanceFuturesFeed:
         logger.error(f"Fallo crítico al consultar endpoint {endpoint} tras {max_retries} reintentos.")
         return None
 
-    def fetch_klines(self, symbol: str, interval: str = "1h", limit: int = 250) -> Optional[pd.DataFrame]:
+    def fetch_klines(self, symbol: str, interval: str = "1h", limit: int = 1000) -> Optional[pd.DataFrame]:
         params = {
             "symbol": symbol.upper(),
             "interval": interval,

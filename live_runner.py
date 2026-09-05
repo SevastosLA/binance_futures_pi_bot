@@ -139,7 +139,7 @@ class BotRunner:
                 # 3. Sincronizar y Evaluar Velas Horarias (1h)
                 for sym in SYMBOLS:
                     try:
-                        df_1h = self.feed.fetch_klines(sym, interval="1h", limit=250)
+                        df_1h = self.feed.fetch_klines(sym, interval="1h", limit=1000)
                         if df_1h is not None and not df_1h.empty:
                             last_closed_time = df_1h.iloc[-2]["Open Time"]
                             if self.last_processed_1h.get(sym) != last_closed_time:

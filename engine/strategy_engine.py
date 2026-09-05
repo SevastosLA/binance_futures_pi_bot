@@ -301,7 +301,7 @@ class StrategyEngine:
                 # Refrescar klines para garantizar que el gráfico contenga la última acción del precio
                 if self.feed is not None:
                     try:
-                        fresh_df = self.feed.fetch_klines(symbol, interval="1h", limit=250)
+                        fresh_df = self.feed.fetch_klines(symbol, interval="1h", limit=1000)
                         if fresh_df is not None and not fresh_df.empty:
                             fresh_df["EMA_200"] = calc_ema(fresh_df["Close"], EMA_PERIOD)
                             df_1h = fresh_df

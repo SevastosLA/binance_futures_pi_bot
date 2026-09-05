@@ -55,7 +55,7 @@ def run_diagnostics():
             
         test_sym = SYMBOLS[0]
         print(f"  📥 Descargando klines 1h para {test_sym}...")
-        df_1h = feed.fetch_klines(test_sym, interval="1h", limit=250)
+        df_1h = feed.fetch_klines(test_sym, interval="1h", limit=1000)
         if df_1h is not None and len(df_1h) >= 200:
             print(f"  ✅ Descargadas {len(df_1h)} velas 1h. Último cierre: ${df_1h.iloc[-2]['Close']:,.2f} USDT")
         else:

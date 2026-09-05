@@ -46,7 +46,7 @@ def run_examples():
     now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     print(f"\n[1/5] Obteniendo datos en vivo de Binance Futures para {symbol}...")
-    df_1h = feed.fetch_klines(symbol, interval="1h", limit=250)
+    df_1h = feed.fetch_klines(symbol, interval="1h", limit=1000)
     if df_1h is None or df_1h.empty:
         print(f"❌ Error al descargar klines para {symbol}")
         return False
