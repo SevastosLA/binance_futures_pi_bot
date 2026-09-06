@@ -123,7 +123,10 @@ class DatabaseManager:
                 ("franco_active", "INTEGER DEFAULT 1"),
                 ("candles_15m_elapsed", "INTEGER DEFAULT 0"),
                 ("effective_risk_pct", "REAL DEFAULT 0.03"),
-                ("execution_type", "TEXT")
+                ("execution_type", "TEXT"),
+                ("fill_candle_time", "TEXT"),
+                ("fill_candle_high", "REAL"),
+                ("fill_candle_low", "REAL")
             ]
             for col_name, col_def in columns_to_add_orders:
                 try:
@@ -241,7 +244,8 @@ class DatabaseManager:
             SET state = 1, side = ?, trigger_time = ?, limit_price = ?, risk_usd = ?,
                 signal_ema = ?, signal_close = ?, entry_time = NULL, fill_price = NULL,
                 tp_price = NULL, sl_price = NULL, franco_active = ?, candles_15m_elapsed = ?,
-                effective_risk_pct = ?, execution_type = NULL, updated_at = ?
+                effective_risk_pct = ?, execution_type = NULL,
+                fill_candle_time = NULL, fill_candle_high = NULL, fill_candle_low = NULL, updated_at = ?
             WHERE symbol = ?
             """, (side, trigger_time, limit_price, risk_usd, signal_ema, signal_close,
                   franco_active, candles_15m_elapsed, effective_risk_pct, now_str, symbol))
@@ -273,9 +277,12 @@ class DatabaseManager:
         tp_price: float, sl_price: float,
         execution_type: str = "CAMPEONA_NORMAL_2PCT",
         effective_risk_pct: float = 0.02,
-        risk_usd: Optional[float] = None
+        risk_usd: Optional[float] = None,
+        fill_candle_time: Optional[str] = None,
+        fill_candle_high: Optional[float] = None,
+        fill_candle_low: Optional[float] = None
     ):
-        """Registra la posición activa con su tipo de ejecución (Francotirador 3% vs Campeona 2%)."""
+        """Registra la posición activa con su tipo de ejecución (Francotirador 3% vs Campeona 2%) y datos de vela."""
         now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -283,16 +290,20 @@ class DatabaseManager:
                 cursor.execute("""
                 UPDATE active_orders
                 SET state = 2, entry_time = ?, fill_price = ?, tp_price = ?, sl_price = ?,
-                    execution_type = ?, effective_risk_pct = ?, risk_usd = ?, updated_at = ?
+                    execution_type = ?, effective_risk_pct = ?, risk_usd = ?,
+                    fill_candle_time = ?, fill_candle_high = ?, fill_candle_low = ?, updated_at = ?
                 WHERE symbol = ?
-                """, (entry_time, fill_price, tp_price, sl_price, execution_type, effective_risk_pct, risk_usd, now_str, symbol))
+                """, (entry_time, fill_price, tp_price, sl_price, execution_type, effective_risk_pct, risk_usd,
+                      fill_candle_time, fill_candle_high, fill_candle_low, now_str, symbol))
             else:
                 cursor.execute("""
                 UPDATE active_orders
                 SET state = 2, entry_time = ?, fill_price = ?, tp_price = ?, sl_price = ?,
-                    execution_type = ?, effective_risk_pct = ?, updated_at = ?
+                    execution_type = ?, effective_risk_pct = ?,
+                    fill_candle_time = ?, fill_candle_high = ?, fill_candle_low = ?, updated_at = ?
                 WHERE symbol = ?
-                """, (entry_time, fill_price, tp_price, sl_price, execution_type, effective_risk_pct, now_str, symbol))
+                """, (entry_time, fill_price, tp_price, sl_price, execution_type, effective_risk_pct,
+                      fill_candle_time, fill_candle_high, fill_candle_low, now_str, symbol))
 
     def reset_order_state(self, symbol: str):
         """Restablece el estado de un símbolo a IDLE (0)."""
@@ -304,7 +315,8 @@ class DatabaseManager:
             SET state = 0, side = NULL, trigger_time = NULL, entry_time = NULL,
                 limit_price = NULL, tp_price = NULL, sl_price = NULL, risk_usd = NULL,
                 signal_ema = NULL, signal_close = NULL, fill_price = NULL, franco_active = 1,
-                candles_15m_elapsed = 0, effective_risk_pct = 0.03, execution_type = NULL, updated_at = ?
+                candles_15m_elapsed = 0, effective_risk_pct = 0.03, execution_type = NULL,
+                fill_candle_time = NULL, fill_candle_high = NULL, fill_candle_low = NULL, updated_at = ?
             WHERE symbol = ?
             """, (now_str, symbol))
 

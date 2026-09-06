@@ -157,7 +157,14 @@ class BotRunner:
                             df_15m = self.feed.fetch_klines(sym, interval="15m", limit=3)
                             h_15m = float(df_15m.iloc[-1]["High"]) if df_15m is not None and not df_15m.empty else price
                             l_15m = float(df_15m.iloc[-1]["Low"]) if df_15m is not None and not df_15m.empty else price
-                            self.engine.evaluate_realtime_tick(sym, current_price=price, candle_15m_high=h_15m, candle_15m_low=l_15m)
+                            t_15m = str(df_15m.iloc[-1]["Open Time"]) if df_15m is not None and not df_15m.empty else None
+                            self.engine.evaluate_realtime_tick(
+                                sym,
+                                current_price=price,
+                                candle_15m_high=h_15m,
+                                candle_15m_low=l_15m,
+                                candle_15m_time=t_15m
+                            )
                 except Exception as e:
                     logger.error(f"Error en evaluación intrabarra en tiempo real: {e}")
 

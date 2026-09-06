@@ -212,7 +212,8 @@ class StrategyEngine:
         self, symbol: str, current_price: float,
         candle_15m_high: Optional[float] = None,
         candle_15m_low: Optional[float] = None,
-        current_time: Optional[datetime.datetime] = None
+        current_time: Optional[datetime.datetime] = None,
+        candle_15m_time: Optional[str] = None
     ):
         """
         Se ejecuta cada 15 segundos o al cierre de sub-velas de 15m.
@@ -313,7 +314,10 @@ class StrategyEngine:
                 self.db.set_position_filled(
                     symbol=symbol, entry_time=now_str, fill_price=limit_p,
                     tp_price=tp_p, sl_price=sl_p, execution_type=execution_type,
-                    effective_risk_pct=effective_risk, risk_usd=risk_usd
+                    effective_risk_pct=effective_risk, risk_usd=risk_usd,
+                    fill_candle_time=candle_15m_time,
+                    fill_candle_high=h_price,
+                    fill_candle_low=l_price
                 )
                 self.notifier.notify_position_filled(
                     symbol=symbol, side=side, entry_time=now_str,
@@ -337,14 +341,39 @@ class StrategyEngine:
             trigger_t = order_state["trigger_time"]
             entry_t = order_state["entry_time"] or now_str
 
+            # Filtrar precios intrabarra para evitar falsos TP/SL con acción de precio previa al fill
+            fill_candle_t = order_state.get("fill_candle_time")
+            is_same_entry_candle = (
+                fill_candle_t is not None and
+                candle_15m_time is not None and
+                candle_15m_time == fill_candle_t
+            )
+
+            if is_same_entry_candle:
+                fill_h = order_state.get("fill_candle_high")
+                fill_l = order_state.get("fill_candle_low")
+                fill_h_val = float(fill_h) if fill_h is not None else current_price
+                fill_l_val = float(fill_l) if fill_l is not None else current_price
+
+                # Solo se considera que la vela alcanzó un nuevo techo si supera el High del momento del fill
+                effective_h = h_price if h_price > fill_h_val else current_price
+                # Solo se considera que la vela alcanzó un nuevo piso si perfora el Low del momento del fill
+                effective_l = l_price if l_price < fill_l_val else current_price
+
+                eval_h = max(current_price, effective_h)
+                eval_l = min(current_price, effective_l)
+            else:
+                eval_h = h_price
+                eval_l = l_price
+
             closed = False
             exit_reason = None
             exit_p = None
             raw_move = 0.0
 
             if side == "LONG":
-                hit_tp = h_price >= tp_p
-                hit_sl = l_price <= sl_p
+                hit_tp = eval_h >= tp_p
+                hit_sl = eval_l <= sl_p
                 if hit_tp and hit_sl:
                     # En toque simultáneo, asumir la ejecución conservadora del Stop Loss
                     closed = True
@@ -362,8 +391,8 @@ class StrategyEngine:
                     exit_p = sl_p
                     raw_move = -SL_PCT - (FEE_MAKER + FEE_TAKER)  # -1.06%
             elif side == "SHORT":
-                hit_tp = l_price <= tp_p
-                hit_sl = h_price >= sl_p
+                hit_tp = eval_l <= tp_p
+                hit_sl = eval_h >= sl_p
                 if hit_tp and hit_sl:
                     closed = True
                     exit_reason = "Stop Loss (-1.0%) [Simultáneo]"

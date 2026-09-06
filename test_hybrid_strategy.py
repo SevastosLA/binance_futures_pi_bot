@@ -392,8 +392,60 @@ def run_tests():
         assert order_sync_60m["state"] == 0, "A los 60 min la orden debe CANCELARSE (state=0)"
         print("  ✅ Sincronización temporal validada al 100%. Vida útil de 15m y 60m respetada estrictamente.")
 
+        # -------------------------------------------------------------
+        # TEST 11: PREVENCIÓN DE FALSO TP EN LA VELA DE ENTRADA (INTRABAR LOOK-AHEAD)
+        # -------------------------------------------------------------
+        print("\n[Test 11] Prevención de Falso Take Profit en vela de entrada con High previo...")
+        db.reset_order_state(symbol)
+        engine.evaluate_hourly_close(symbol, df_bullish)
+        order_t11 = db.get_order_state(symbol)
+        assert order_t11["state"] == 1, "Debe existir orden pendiente"
+        limit_p11 = order_t11["limit_price"]
+        tp_target11 = limit_p11 * 1.01  # +1.0%
+
+        candle_time_str = "2026-09-11 09:00:00"
+        high_pre_fill = tp_target11 + 500.0  # El High previo de la vela estaba por encima del TP
+
+        # Llenar la orden en esa vela de 15m
+        engine.evaluate_realtime_tick(
+            symbol=symbol,
+            current_price=limit_p11,
+            candle_15m_high=high_pre_fill,
+            candle_15m_low=limit_p11 - 10.0,
+            candle_15m_time=candle_time_str
+        )
+        pos_t11 = db.get_order_state(symbol)
+        assert pos_t11["state"] == 2, "La orden debe estar en state=2 (ACTIVE)"
+        assert pos_t11["fill_candle_time"] == candle_time_str
+        assert abs(pos_t11["fill_candle_high"] - high_pre_fill) < 1e-4
+
+        # Tick siguiente dentro de la MISMA vela de 15m: el precio está cerca de la entrada (por debajo de TP)
+        # El High de la vela de 15m sigue siendo high_pre_fill (que es > tp_target11)
+        engine.evaluate_realtime_tick(
+            symbol=symbol,
+            current_price=limit_p11 + 10.0,  # Lejos del TP
+            candle_15m_high=high_pre_fill,
+            candle_15m_low=limit_p11 - 10.0,
+            candle_15m_time=candle_time_str
+        )
+        pos_still_active = db.get_order_state(symbol)
+        assert pos_still_active["state"] == 2, "La posición DEBE PERMANECER ABIERTA (evita falso TP por High previo)"
+        print("  ✅ Falso TP evitado: la posición permanece abierta a pesar de que el High previo superaba el TP.")
+
+        # Ahora el precio posterior al fill realmente sube y toca el TP:
+        engine.evaluate_realtime_tick(
+            symbol=symbol,
+            current_price=tp_target11 + 5.0,
+            candle_15m_high=high_pre_fill,
+            candle_15m_low=limit_p11 - 10.0,
+            candle_15m_time=candle_time_str
+        )
+        pos_closed_tp = db.get_order_state(symbol)
+        assert pos_closed_tp["state"] == 0, "La posición debe cerrarse legítimamente cuando el precio post-fill toca el TP"
+        print("  ✅ TP legítimo ejecutado correctamente cuando el precio real post-fill alcanza el objetivo.")
+
         print("\n" + "=" * 80)
-        print(" 🎉 ¡TODAS LAS 10 PRUEBAS CUANTITATIVAS PASARON AL 100%!")
+        print(" 🎉 ¡TODAS LAS 11 PRUEBAS CUANTITATIVAS PASARON AL 100%!")
         print(" El modelo híbrido funciona con exactitud matemática rigurosa.")
         print("=" * 80)
         return True
