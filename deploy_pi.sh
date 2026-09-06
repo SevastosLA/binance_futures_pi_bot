@@ -33,7 +33,7 @@ rm -f data/bot_state.db*
 python3 -c "from storage.database import DatabaseManager; db = DatabaseManager(); print('  ✅ Base de datos reinicializada con $100 USD iniciales ($20 por activo):', list(db.get_all_subwallets().keys()))"
 
 # 4. Validar Suite de Pruebas Cuantitativas Híbridas
-echo "\n[4/5] Ejecutando suite de validación cuantitativa (9 pruebas)..."
+echo "\n[4/5] Ejecutando suite de validación cuantitativa (11 pruebas)..."
 python3 test_hybrid_strategy.py
 
 # 5. Configurar e Iniciar Servicio Systemd Perpetuo
