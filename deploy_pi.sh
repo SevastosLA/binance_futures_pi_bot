@@ -13,19 +13,12 @@ echo " 🚀 DESPLIEGUE Y LANZAMIENTO DESDE CERO EN RASPBERRY PI 4B"
 echo "=================================================================="
 
 # 1. Asegurar la última versión de GitHub
-echo -e "\n[1/5] Actualizando código desde GitHub (origin/main)..."
+echo "\n[1/5] Actualizando código desde GitHub (origin/main)..."
 git fetch origin main
 git reset --hard origin/main
 
-# Verificar archivo de configuración .env
-if [ ! -f ".env" ]; then
-    echo -e "  ⚠️ Archivo .env no encontrado. Creando a partir de .env.example..."
-    cp .env.example .env
-    echo -e "  👉 Recuerda configurar TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID en .env si deseas alertas."
-fi
-
 # 2. Configuración del Entorno Virtual Python (.venv)
-echo -e "\n[2/5] Verificando entorno virtual Python..."
+echo "\n[2/5] Verificando entorno virtual Python..."
 if [ ! -d ".venv" ]; then
     echo "  📦 Creando entorno virtual .venv..."
     python3 -m venv .venv
@@ -35,12 +28,12 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 # 3. Reinicializar Base de Datos SQLite WAL desde Cero
-echo -e "\n[3/5] Reinicializando base de datos SQLite WAL desde cero..."
+echo "\n[3/5] Reinicializando base de datos SQLite WAL desde cero..."
 rm -f data/bot_state.db*
-python3 -c "from storage.database import DatabaseManager; db = DatabaseManager(); print('  ✅ Base de datos reinicializada con capital inicial:', list(db.get_all_subwallets().keys()))"
+python3 -c "from storage.database import DatabaseManager; db = DatabaseManager(); print('  ✅ Base de datos reinicializada con $100 USD iniciales ($20 por activo):', list(db.get_all_subwallets().keys()))"
 
 # 4. Validar Suite de Pruebas Cuantitativas Híbridas
-echo -e "\n[4/5] Ejecutando suite de validación cuantitativa (11 pruebas)..."
+echo "\n[4/5] Ejecutando suite de validación cuantitativa (9 pruebas)..."
 python3 test_hybrid_strategy.py
 
 # 5. Configurar e Iniciar Servicio Systemd Perpetuo
