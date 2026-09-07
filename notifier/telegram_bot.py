@@ -1,8 +1,8 @@
 """
 Módulo de Notificaciones de Telegram con Gráficos de Velas y Cola Offline.
 Envía fotos con texto enriquecido al colocar orden límite, llenarse la posición,
-tocar TP/SL, cancelar orden o expirar el tramo Francotirador.
-Soporta el modelo cuantitativo híbrido (La Campeona 2% + El Francotirador 1%).
+tocar TP/SL, o cancelar orden.
+Soporta el modelo cuantitativo Multi-Cartera (E1-E5).
 """
 
 import io
@@ -126,10 +126,6 @@ class TelegramNotifier:
             return False
 
     def export_table_to_csv(self, table_name: str) -> Optional[io.BytesIO]:
-        """
-        Exporta una tabla de SQLite a un buffer CSV en memoria con codificación UTF-8
-        y timestamps en formato estándar ISO limpio (YYYY-MM-DD HH:MM:SS).
-        """
         allowed_tables = ["trade_history", "subwallets", "active_orders"]
         if table_name not in allowed_tables:
             logger.error(f"Tabla no permitida para exportar: {table_name}")
@@ -140,7 +136,6 @@ class TelegramNotifier:
                 df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
 
             csv_buf = io.BytesIO()
-            # utf-8-sig (con BOM) para compatibilidad nativa con Excel / Numbers
             df.to_csv(csv_buf, index=False, encoding="utf-8-sig")
             csv_buf.seek(0)
             return csv_buf
@@ -149,7 +144,6 @@ class TelegramNotifier:
             return None
 
     def handle_command(self, text: str, from_chat_id: str):
-        """Procesa comandos interactivos enviados por Telegram."""
         if str(from_chat_id) != str(self.chat_id):
             logger.warning(f"Comando ignorado de chat_id no autorizado: {from_chat_id}")
             return
@@ -162,8 +156,7 @@ class TelegramNotifier:
 
         if cmd in ["/start", "/help", "/ayuda"]:
             help_msg = (
-                "🤖 <b>PANEL DE CONTROL — BOT HÍBRIDO CRIPTO</b>\n"
-                "<i>(La Campeona 2% + El Francotirador 1%)</i>\n"
+                "🤖 <b>PANEL DE CONTROL — BOT MULTI-CARTERA (E1-E5)</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "📥 <b>Descarga de Bases de Datos en CSV:</b>\n"
                 "• /trades o /csv_trades — Historial de operaciones cerradas\n"
@@ -179,30 +172,21 @@ class TelegramNotifier:
         elif cmd in ["/trades", "/csv_trades", "/historial"]:
             buf = self.export_table_to_csv("trade_history")
             if buf:
-                self.send_document(
-                    buf, filename="trade_history.csv",
-                    caption="📊 <b>Historial de Operaciones Híbridas</b> (CSV)"
-                )
+                self.send_document(buf, filename="trade_history.csv", caption="📊 <b>Historial de Operaciones E1-E5</b> (CSV)")
             else:
                 self.send_message("❌ Error generando CSV de historial de trades.")
 
         elif cmd in ["/wallets", "/csv_wallets", "/carteras"]:
             buf = self.export_table_to_csv("subwallets")
             if buf:
-                self.send_document(
-                    buf, filename="subwallets.csv",
-                    caption="💼 <b>Saldos y Subcarteras</b> (CSV)"
-                )
+                self.send_document(buf, filename="subwallets.csv", caption="💼 <b>Saldos y Subcarteras</b> (CSV)")
             else:
                 self.send_message("❌ Error generando CSV de subcarteras.")
 
         elif cmd in ["/orders", "/csv_orders", "/ordenes"]:
             buf = self.export_table_to_csv("active_orders")
             if buf:
-                self.send_document(
-                    buf, filename="active_orders.csv",
-                    caption="📈 <b>Órdenes y Posiciones Activas</b> (CSV)"
-                )
+                self.send_document(buf, filename="active_orders.csv", caption="📈 <b>Órdenes y Posiciones Activas</b> (CSV)")
             else:
                 self.send_message("❌ Error generando CSV de órdenes activas.")
 
@@ -225,12 +209,17 @@ class TelegramNotifier:
             tot_dep = sum(w["cum_deposited"] for w in wallets.values())
             roi_pct = ((tot_cap - tot_dep) / tot_dep) * 100 if tot_dep > 0 else 0.0
 
-            active_cnt = sum(1 for sym in wallets if self.db.get_order_state(sym).get("state") == 2)
-            pending_cnt = sum(1 for sym in wallets if self.db.get_order_state(sym).get("state") == 1)
+            active_cnt = 0
+            pending_cnt = 0
+            for sym in wallets:
+                orders = self.db.get_all_orders_for_symbol(sym)
+                for order in orders:
+                    if order["state"] == 2: active_cnt += 1
+                    elif order["state"] == 1: pending_cnt += 1
 
             now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC+0")
             msg = (
-                "📊 <b>ESTADO DE LA CARTERA Y BOT HÍBRIDO</b>\n"
+                "📊 <b>ESTADO DE LA CARTERA Y BOT MULTI-ESTRATEGIA</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 f"💼 <b>Capital Total:</b> ${tot_cap:,.2f} USD\n"
                 f"💵 <b>Aportes Acumulados:</b> ${tot_dep:,.2f} USD ({roi_pct:+.2f}% ROI)\n"
@@ -243,31 +232,21 @@ class TelegramNotifier:
             self.send_message(msg)
 
         else:
-            self.send_message(
-                f"❓ Comando no reconocido: <code>{cmd}</code>\n"
-                "Escribe /help para ver la lista de comandos disponibles."
-            )
+            self.send_message(f"❓ Comando no reconocido: <code>{cmd}</code>\nEscribe /help para ver la lista de comandos disponibles.")
 
     def start_command_listener(self):
-        """Inicia el listener de comandos en segundo plano si hay credenciales."""
         if not self.bot_token or not self.chat_id or not self.base_updates_url:
-            logger.info("Telegram no configurado. Listener de comandos omitido.")
             return
-
         if self._listener_thread and self._listener_thread.is_alive():
             return
-
         self._listener_running = True
         self._listener_thread = threading.Thread(target=self._command_poll_loop, daemon=True, name="TelegramCmdListener")
         self._listener_thread.start()
-        logger.info("📡 Listener interactivo de comandos de Telegram iniciado en segundo plano.")
 
     def stop_command_listener(self):
-        """Detiene el listener de comandos."""
         self._listener_running = False
 
     def _command_poll_loop(self):
-        """Bucle en segundo plano para escuchar comandos entrantes vía Long Polling."""
         try:
             init_resp = requests.get(self.base_updates_url, params={"offset": -1}, timeout=5.0)
             if init_resp.status_code == 200:
@@ -279,11 +258,7 @@ class TelegramNotifier:
 
         while self._listener_running:
             try:
-                params = {
-                    "offset": self.last_update_id + 1,
-                    "timeout": 10,
-                    "allowed_updates": ["message"]
-                }
+                params = {"offset": self.last_update_id + 1, "timeout": 10, "allowed_updates": ["message"]}
                 resp = requests.get(self.base_updates_url, params=params, timeout=15.0)
                 if resp.status_code == 200:
                     data = resp.json()
@@ -298,86 +273,42 @@ class TelegramNotifier:
                 elif resp.status_code == 409:
                     time.sleep(5)
             except Exception as e:
-                logger.debug(f"Aviso en loop de comandos Telegram: {e}")
                 time.sleep(3)
 
     # -------------------------------------------------------------
-    # EVENTOS DE TRADING HÍBRIDO
+    # EVENTOS DE TRADING E1-E5
     # -------------------------------------------------------------
-    def notify_limit_placed(
-        self, symbol: str, side: str, trigger_time: str, signal_close: float,
-        signal_ema: float, limit_price: float, risk_usd: float, capital: float,
-        hwm: float, df_1h: Optional[pd.DataFrame] = None,
-        risk_pct: float = 0.03, risk_campeona_usd: Optional[float] = None,
-        risk_franco_usd: Optional[float] = None
-    ):
-        """Notificación de orden límite híbrida colocada (La Campeona 2% + El Francotirador 1%)."""
+    def notify_limit_placed(self, symbol: str, strategy_id: str, side: str, trigger_time: str, limit_price: float, risk_usd: float, capital: float, hwm: float):
         side_icon = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
-        c_usd = risk_campeona_usd if risk_campeona_usd is not None else (hwm * 0.02)
-        f_usd = risk_franco_usd if risk_franco_usd is not None else (hwm * 0.01)
-
         text = (
-            f"📝 <b>ORDEN LÍMITE HÍBRIDA COLOCADA</b>\n"
+            f"📝 <b>ORDEN LÍMITE COLOCADA [{strategy_id}]</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🪙 <b>Activo:</b> <code>{symbol}</code> ({side_icon})\n"
-            f"🎯 <b>Precio Límite (-1.0%):</b> ${limit_price:,.2f}\n"
-            f"💰 <b>Riesgo Inicial Combinado:</b> ${risk_usd:,.2f} USD ({risk_pct*100:.1f}% HWM)\n"
-            f"   • 🛡️ <b>La Campeona (2%):</b> ${c_usd:,.2f} USD (hasta 60 min)\n"
-            f"   • 🎯 <b>El Francotirador (1%):</b> ${f_usd:,.2f} USD (expira en 15 min)\n"
+            f"🎯 <b>Precio Límite:</b> ${limit_price:,.2f}\n"
+            f"💰 <b>Riesgo Asignado:</b> ${risk_usd:,.2f} USD\n"
             f"💼 <b>Capital Subcartera:</b> ${capital:,.2f} USD (HWM: ${hwm:,.2f})\n"
             f"⏱️ <b>Hora Señal:</b> {trigger_time} UTC\n"
-            f"⏳ <i>Esperando retroceso en sub-velas de 15m...</i>"
+            f"⏳ <i>Esperando retroceso (Expira en 60 min)...</i>"
         )
         self.send_message(text)
 
-    def notify_franco_expired(
-        self, symbol: str, side: str, limit_price: float,
-        new_risk_usd: float, expire_time: str
-    ):
-        """Notificación de expiración del tramo Francotirador (15 min sin llenado)."""
+    def notify_position_filled(self, symbol: str, strategy_id: str, side: str, entry_time: str, fill_price: float, tp_price: float, sl_price: float, risk_usd: float, df_1h: Optional[pd.DataFrame] = None):
         side_icon = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
+        badge = f"⚡ <b>EJECUCIÓN A MERCADO [{strategy_id}]</b>" if strategy_id == "E5" else f"⚖️ <b>ORDEN LÍMITE LLENADA [{strategy_id}]</b>"
+        
         text = (
-            f"🎯 <b>FRANCOTIRADOR EXPIRADO (15 min)</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 <b>Activo:</b> <code>{symbol}</code> ({side_icon})\n"
-            f"⏳ <i>Transcurrieron 15 minutos sin llenado en primera vela.</i>\n"
-            f"📉 <b>Riesgo Reducido:</b> de 3.0% a <b>2.0% HWM</b> (${new_risk_usd:,.2f} USD)\n"
-            f"🎯 <b>Precio Límite Esperado:</b> ${limit_price:,.2f}\n"
-            f"🛡️ <i>Tramo Campeona (2%) permanece activo hasta los 60 min.</i>\n"
-            f"⏱️ <b>Hora:</b> {expire_time} UTC"
-        )
-        self.send_message(text)
-
-    def notify_position_filled(
-        self, symbol: str, side: str, entry_time: str, fill_price: float,
-        tp_price: float, sl_price: float, risk_usd: float,
-        df_1h: Optional[pd.DataFrame] = None,
-        execution_type: str = "CAMPEONA_NORMAL_2PCT",
-        risk_pct: float = 0.02
-    ):
-        """Notificación estructurada de orden ejecutada con insignia visual de ejecución."""
-        side_icon = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
-        if execution_type == "FRANCOTIRADOR_BOOST_3PCT":
-            badge = "⚡ <b>EJECUCIÓN: FRANCOTIRADOR BOOST (3.0% Riesgo)</b>"
-            subtitle = "🎯 <i>Llenado en ≤15m (Absorción veloz, prob. histórica ~77%)</i>"
-        else:
-            badge = "⚖️ <b>EJECUCIÓN: CAMPEONA NORMAL (2.0% Riesgo)</b>"
-            subtitle = "🛡️ <i>Llenado ordinario entre minutos 15 y 60</i>"
-
-        text = (
-            f"🎯 <b>ORDEN LLENADA — POSICIÓN ACTIVA</b>\n"
+            f"🎯 <b>POSICIÓN ACTIVA</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{badge}\n"
-            f"{subtitle}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🪙 <b>Activo:</b> <code>{symbol}</code> ({side_icon})\n"
             f"💵 <b>Precio Entrada:</b> ${fill_price:,.2f}\n"
-            f"🟢 <b>Take Profit (+1.0%):</b> ${tp_price:,.2f}\n"
-            f"🔴 <b>Stop Loss (-1.0%):</b> ${sl_price:,.2f}\n"
-            f"💰 <b>Riesgo en Juego:</b> ${risk_usd:,.2f} USD ({risk_pct*100:.1f}% HWM)\n"
+            f"🟢 <b>Take Profit:</b> ${tp_price:,.2f}\n"
+            f"🔴 <b>Stop Loss:</b> ${sl_price:,.2f}\n"
+            f"💰 <b>Riesgo en Juego:</b> ${risk_usd:,.2f} USD\n"
             f"⏱️ <b>Hora Entrada:</b> {entry_time} UTC\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🛡️ <i>Monitoreando TP (+1%) / SL (-1%) o salida en 4ª vela</i>"
+            f"🛡️ <i>Monitoreando TP / SL</i>"
         )
         
         photo_buf = None
@@ -385,7 +316,7 @@ class TelegramNotifier:
             try:
                 photo_buf = generate_trade_chart(
                     symbol=symbol, df_1h=df_1h,
-                    title=f"Posición Activa {side} — Entrada en ${fill_price:,.2f}",
+                    title=f"Posición Activa {side} [{strategy_id}] — Entrada en ${fill_price:,.2f}",
                     limit_price=fill_price, tp_price=tp_price, sl_price=sl_price
                 )
             except Exception as e:
@@ -393,53 +324,34 @@ class TelegramNotifier:
                 
         self.send_photo_or_text(photo_buf, text)
 
-    def notify_position_closed(
-        self, symbol: str, side: str, exit_time: str, exit_price: float,
-        exit_reason: str, dollar_pnl: float, net_return_pct: float,
-        win: bool, new_capital: float, new_hwm: float,
-        df_1h: Optional[pd.DataFrame] = None, entry_price: Optional[float] = None,
-        execution_type: Optional[str] = None
-    ):
-        """Notificación de cierre de posición con resultado y tipo de ejecución."""
-        icon = "🏆 <b>TAKE PROFIT ALCANZADO (+1.0%)</b>" if win else "🛑 <b>POSICIÓN CERRADA</b>"
+    def notify_position_closed(self, symbol: str, strategy_id: str, side: str, exit_time: str, exit_price: float, exit_reason: str, dollar_pnl: float, net_return_pct: float, win: bool, new_capital: float, new_hwm: float):
+        icon = f"🏆 <b>TAKE PROFIT [{strategy_id}]</b>" if win else f"🛑 <b>STOP LOSS [{strategy_id}]</b>"
         pnl_sign = "+" if dollar_pnl >= 0 else ""
         pnl_color = "🟢" if win else "🔴"
-
-        exec_badge = ""
-        if execution_type == "FRANCOTIRADOR_BOOST_3PCT":
-            exec_badge = "⚡ <b>Tipo Operación:</b> Francotirador Boost (3.0% Riesgo)\n"
-        elif execution_type == "CAMPEONA_NORMAL_2PCT":
-            exec_badge = "⚖️ <b>Tipo Operación:</b> Campeona Normal (2.0% Riesgo)\n"
 
         text = (
             f"{icon}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🪙 <b>Activo:</b> <code>{symbol}</code> ({side})\n"
-            f"{exec_badge}"
             f"💵 <b>Precio Cierre:</b> ${exit_price:,.2f}\n"
             f"📋 <b>Motivo:</b> {exit_reason}\n"
             f"{pnl_color} <b>Resultado:</b> {pnl_sign}${dollar_pnl:,.4f} USD ({pnl_sign}{net_return_pct:.2f}%)\n"
             f"💼 <b>Nuevo Capital:</b> ${new_capital:,.2f} USD (HWM: ${new_hwm:,.2f})\n"
             f"⏱️ <b>Hora:</b> {exit_time} UTC\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔄 <i>Estado restablecido a búsqueda de oportunidades (IDLE)</i>"
+            f"🔄 <i>Buscando nuevas oportunidades...</i>"
         )
         self.send_message(text)
 
-    def notify_order_cancelled(
-        self, symbol: str, side: str, reason: str, limit_price: float,
-        cancel_time: str, df_1h: Optional[pd.DataFrame] = None
-    ):
-        """Notificación breve y concisa de cancelación de orden límite (Solo Texto)."""
+    def notify_order_cancelled(self, symbol: str, strategy_id: str, side: str, reason: str, limit_price: float, cancel_time: str):
         side_icon = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
         text = (
-            f"❌ <b>ORDEN LÍMITE CANCELADA</b>\n"
+            f"❌ <b>ORDEN LÍMITE CANCELADA [{strategy_id}]</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🪙 <b>Activo:</b> <code>{symbol}</code> ({side_icon})\n"
             f"🎯 <b>Precio esperado:</b> ${limit_price:,.2f}\n"
             f"⚠️ <b>Motivo:</b> {reason}\n"
-            f"⏱️ <b>Hora:</b> {cancel_time} UTC\n"
-            f"🔄 <i>Buscando nueva oportunidad (IDLE)</i>"
+            f"⏱️ <b>Hora:</b> {cancel_time} UTC"
         )
         self.send_message(text)
 
@@ -448,7 +360,7 @@ class TelegramNotifier:
         text = (
             f"💚 <b>ESTADO DEL SISTEMA (HEARTBEAT)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 <b>Bot Status:</b> Operativo 24/7 (Raspberry Pi — Modo Híbrido)\n"
+            f"🤖 <b>Bot Status:</b> Operativo 24/7 (Raspberry Pi — Multi-Cartera E1-E5)\n"
             f"⏱️ <b>Uptime:</b> {uptime_str}\n"
             f"🌡️ <b>Temp CPU:</b> {cpu_temp} | <b>RAM:</b> {ram_usage}\n"
             f"💼 <b>Capital Total Fondo:</b> ${total_equity:,.2f} USD ({roi_pct:+.2f}% ROI)\n"

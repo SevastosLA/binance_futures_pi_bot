@@ -112,7 +112,8 @@ class StrategyEngine:
     def _place_order(self, symbol, strategy_id, side, trigger_time, limit_price, risk_usd, signal_close):
         self.db.set_pending_order(symbol, strategy_id, side, trigger_time, limit_price, risk_usd)
         logger.info(f"[{symbol}] {strategy_id} Señal {side} detectada. Orden límite en ${limit_price:,.2f} (Riesgo: ${risk_usd:,.2f})")
-        # Podemos integrar el notifier.telegram_bot aquí si hace falta.
+        wallet = self.db.get_subwallet(symbol)
+        self.notifier.notify_limit_placed(symbol, strategy_id, side, trigger_time, limit_price, risk_usd, wallet["capital"], wallet["hwm"])
         
     def _fill_market_order(self, symbol, strategy_id, side, trigger_time, fill_price, risk_usd):
         tp_pct = 0.018
@@ -123,6 +124,7 @@ class StrategyEngine:
         self.db.set_pending_order(symbol, strategy_id, side, trigger_time, fill_price, risk_usd)
         self.db.set_position_filled(symbol, strategy_id, trigger_time, fill_price, tp_price, sl_price)
         logger.info(f"🎯 [{symbol}] {strategy_id} Posición {side} MARKET LLENADA a ${fill_price:,.2f}. TP: ${tp_price:,.2f} | SL: ${sl_price:,.2f}")
+        self.notifier.notify_position_filled(symbol, strategy_id, side, trigger_time, fill_price, tp_price, sl_price, risk_usd)
 
     def evaluate_realtime_tick(self, symbol: str, current_price: float, current_time: Optional[datetime.datetime] = None):
         orders = self.db.get_all_orders_for_symbol(symbol)
@@ -158,6 +160,7 @@ class StrategyEngine:
                 if elapsed_seconds >= (ORDER_TIMEOUT_MINUTES * 60):
                     self.db.reset_order_state(symbol, strategy_id)
                     logger.info(f"❌ [{symbol}] {strategy_id} Orden límite expirada tras {ORDER_TIMEOUT_MINUTES} minutos.")
+                    self.notifier.notify_order_cancelled(symbol, strategy_id, side, f"Expirada tras {ORDER_TIMEOUT_MINUTES} min", limit_p, now_str)
                     continue
 
                 filled = False
@@ -175,6 +178,7 @@ class StrategyEngine:
 
                     self.db.set_position_filled(symbol, strategy_id, now_str, limit_p, tp_price, sl_price)
                     logger.info(f"🎯 [{symbol}] {strategy_id} Posición {side} LLENADA. Entrada: ${limit_p:,.2f}. TP: ${tp_price:,.2f} | SL: ${sl_price:,.2f}")
+                    self.notifier.notify_position_filled(symbol, strategy_id, side, now_str, limit_p, tp_price, sl_price, risk_usd)
 
             elif state == 2:
                 entry_p = float(order["fill_price"])
@@ -235,3 +239,4 @@ class StrategyEngine:
                     self.db.record_completed_trade(trade_record)
                     self.db.reset_order_state(symbol, strategy_id)
                     logger.info(f"🏁 [{symbol}] {strategy_id} Posición cerrada por {exit_reason}. PnL: ${dpnl:+.4f} USD. Capital actual: ${new_cap:,.2f}")
+                    self.notifier.notify_position_closed(symbol, strategy_id, side, now_str, exit_p, exit_reason, dpnl, raw_move * 100, dpnl > 0, new_cap, new_hwm)
