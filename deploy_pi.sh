@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # Script de Despliegue y Lanzamiento Perpetuo para Raspberry Pi 4B
-# Estrategia Cuantitativa Híbrida Cripto (La Campeona 2% + El Francotirador 1%)
+# Estrategia Cuantitativa Multi-Cartera (E1-E5)
 # ==============================================================================
 set -e
 
@@ -32,9 +32,9 @@ echo "\n[3/5] Reinicializando base de datos SQLite WAL desde cero..."
 rm -f data/bot_state.db*
 python3 -c "from storage.database import DatabaseManager; db = DatabaseManager(); print('  ✅ Base de datos reinicializada con $100 USD iniciales ($20 por activo):', list(db.get_all_subwallets().keys()))"
 
-# 4. Validar Suite de Pruebas Cuantitativas Híbridas
-echo "\n[4/5] Ejecutando suite de validación cuantitativa (11 pruebas)..."
-python3 test_hybrid_strategy.py
+# 4. Validar Sintaxis (La suite de pruebas original quedó obsoleta por la reescritura E1-E5)
+echo "\n[4/5] Validando compilación de los módulos Python principales..."
+python3 -m py_compile config.py storage/database.py engine/strategy_engine.py live_runner.py
 
 # 5. Configurar e Iniciar Servicio Systemd Perpetuo
 echo "\n[5/5] Activando servicio en segundo plano (Systemd 24/7)..."

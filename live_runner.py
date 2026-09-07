@@ -1,8 +1,8 @@
 """
 Ejecutable Principal del Bot Cuantitativo 24/7 para Raspberry Pi.
-Estrategia Híbrida Cripto (La Campeona 2% + El Francotirador 1%).
-Orquesta la ingesta de datos, evaluación de señales horarias en 1h,
-gestión intrabarra en 15m/tiempo real, persistencia SQLite WAL y alertas de Telegram.
+Estrategia HWM Multi-Cartera (E1-E5).
+Orquesta la ingesta de datos, evaluación de señales en múltiples temporalidades (15m, 1h, 4h),
+gestión intrabarra en tiempo real (polling), persistencia SQLite WAL y alertas de Telegram.
 """
 
 import os
@@ -47,8 +47,8 @@ class BotRunner:
         self.feed = BinanceFuturesFeed()
         self.engine = StrategyEngine(self.db, self.notifier, feed=self.feed)
         
-        # Estado en memoria para sincronización de velas
-        self.last_processed_1h: Dict[str, Optional[datetime.datetime]] = {s: None for s in SYMBOLS}
+        # Estado en memoria para sincronización de velas de 15m
+        self.last_processed_15m: Dict[str, Optional[datetime.datetime]] = {s: None for s in SYMBOLS}
         
         # Captura de señales del SO (SIGINT / SIGTERM) para apagado limpio
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -94,10 +94,9 @@ class BotRunner:
     def startup(self):
         """Mensaje inicial y verificación de estado en el arranque."""
         logger.info("=" * 70)
-        logger.info(" 🤖 INICIANDO ANTIGRAVITY BINANCE FUTURES BOT (MODO HÍBRIDO)")
+        logger.info(" 🤖 INICIANDO ANTIGRAVITY BINANCE FUTURES BOT (MODO MULTI-CARTERA E1-E5)")
         logger.info(f" Modo: {TRADING_MODE} | Activos: {', '.join(SYMBOLS)}")
-        logger.info(" Estrategia: La Campeona 2% + El Francotirador 1%")
-        logger.info(" Gráficos en Alertas: ACTIVADOS 📊 (Matplotlib Headless)")
+        logger.info(" Estrategia: 5 Sub-Bots (E1-E5) por Moneda Independientes")
         logger.info("=" * 70)
 
         startup_msg = (
@@ -105,9 +104,8 @@ class BotRunner:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 <b>Modo:</b> {TRADING_MODE} (Binance Futures)\n"
             f"🪙 <b>Activos Vigilados:</b> <code>{', '.join(SYMBOLS)}</code>\n"
-            f"🏹 <b>Estrategia:</b> Híbrida (La Campeona 2% + El Francotirador 1%)\n"
-            f"📊 <b>Gráficos en Alertas:</b> Activados (Visual Chart Suite)\n"
-            f"🛡️ <b>Gestión:</b> High-Water Mark Asimétrico (3% → 2%) + DCA Semanal\n"
+            f"🏹 <b>Estrategia:</b> Multi-Cartera Concurrente (E1-E5)\n"
+            f"🛡️ <b>Gestión:</b> High-Water Mark Independiente por Moneda\n"
             f"⏱️ <b>Hora Arranque:</b> {self.start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC"
         )
         self.notifier.send_message(startup_msg)
@@ -136,35 +134,29 @@ class BotRunner:
                         f"👑 <i>High-Water Mark incrementado equitativamente.</i>"
                     )
 
-                # 3. Sincronizar y Evaluar Velas Horarias (1h)
+                # 3. Sincronizar y Evaluar Velas (15m, 1h, 4h)
                 for sym in SYMBOLS:
                     try:
-                        df_1h = self.feed.fetch_klines(sym, interval="1h", limit=1000)
-                        if df_1h is not None and not df_1h.empty:
-                            last_closed_time = df_1h.iloc[-2]["Open Time"]
-                            if self.last_processed_1h.get(sym) != last_closed_time:
-                                self.engine.evaluate_hourly_close(sym, df_1h)
-                                self.last_processed_1h[sym] = last_closed_time
+                        df_15m = self.feed.fetch_klines(sym, interval="15m", limit=100)
+                        if df_15m is not None and not df_15m.empty:
+                            last_closed_time = df_15m.iloc[-2]["Open Time"]
+                            if self.last_processed_15m.get(sym) != last_closed_time:
+                                # Hay una nueva vela de 15m cerrada, bajamos el resto para evaluación
+                                df_1h = self.feed.fetch_klines(sym, interval="1h", limit=200)
+                                df_4h = self.feed.fetch_klines(sym, interval="4h", limit=200)
+                                if df_1h is not None and df_4h is not None:
+                                    self.engine.evaluate_klines(sym, df_15m, df_1h, df_4h)
+                                    self.last_processed_15m[sym] = last_closed_time
                     except Exception as e:
-                        logger.error(f"Error procesando vela 1h para {sym}: {e}")
+                        logger.error(f"Error procesando klines para {sym}: {e}")
 
-                # 4. Evaluar Ejecución Intrabarra / Precios en Tiempo Real (15m y Ticks)
+                # 4. Evaluar Ejecución Intrabarra / Precios en Tiempo Real
                 try:
                     current_prices = self.feed.fetch_all_latest_prices(SYMBOLS)
                     for sym in SYMBOLS:
                         price = current_prices.get(sym)
                         if price:
-                            df_15m = self.feed.fetch_klines(sym, interval="15m", limit=3)
-                            h_15m = float(df_15m.iloc[-1]["High"]) if df_15m is not None and not df_15m.empty else price
-                            l_15m = float(df_15m.iloc[-1]["Low"]) if df_15m is not None and not df_15m.empty else price
-                            t_15m = str(df_15m.iloc[-1]["Open Time"]) if df_15m is not None and not df_15m.empty else None
-                            self.engine.evaluate_realtime_tick(
-                                sym,
-                                current_price=price,
-                                candle_15m_high=h_15m,
-                                candle_15m_low=l_15m,
-                                candle_15m_time=t_15m
-                            )
+                            self.engine.evaluate_realtime_tick(sym, current_price=price, current_time=now)
                 except Exception as e:
                     logger.error(f"Error en evaluación intrabarra en tiempo real: {e}")
 
@@ -175,8 +167,13 @@ class BotRunner:
                     tot_equity = sum(w["capital"] for w in wallets.values())
                     tot_dep = sum(w["cum_deposited"] for w in wallets.values())
                     
-                    active_pos_cnt = sum(1 for sym in SYMBOLS if self.db.get_order_state(sym).get("state") == 2)
-                    pending_cnt = sum(1 for sym in SYMBOLS if self.db.get_order_state(sym).get("state") == 1)
+                    # Contar ordenes de las 5 estrategias
+                    active_pos_cnt = 0
+                    pending_cnt = 0
+                    for sym in SYMBOLS:
+                        for order in self.db.get_all_orders_for_symbol(sym):
+                            if order["state"] == 2: active_pos_cnt += 1
+                            elif order["state"] == 1: pending_cnt += 1
 
                     self.notifier.notify_heartbeat(
                         uptime_str=telemetry["uptime"],
